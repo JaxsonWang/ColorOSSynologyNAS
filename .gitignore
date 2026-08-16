@@ -1,0 +1,9 @@
+.gradle/
+.idea/
+local.properties
+**/build/
+captures/
+*.iml
+/.agents/
+/AGENTS.md
+/dist/

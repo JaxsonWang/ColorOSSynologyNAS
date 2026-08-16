@@ -1,0 +1,54 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.plugin.compose'
+}
+
+android {
+    namespace = 'com.jaxson.coloros.synologynas'
+    compileSdk = 37
+    buildToolsVersion = '37.0.0'
+
+    defaultConfig {
+        applicationId = 'com.jaxson.coloros.synologynas'
+        minSdk = 36
+        targetSdk = 37
+        versionCode = 10
+        versionName = '1.3.4'
+
+        testInstrumentationRunner = 'androidx.test.runner.AndroidJUnitRunner'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled = false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_21
+        targetCompatibility = JavaVersion.VERSION_21
+    }
+
+    packaging {
+        resources {
+            merges.add('META-INF/xposed/*')
+            excludes.add('META-INF/DEPENDENCIES')
+            excludes.add('META-INF/LICENSE*')
+            excludes.add('META-INF/NOTICE*')
+        }
+    }
+
+    lint {
+        abortOnError = true
+        checkReleaseBuilds = false
+    }
+}
+
+dependencies {
+    implementation 'androidx.activity:activity-compose:1.13.0'
+    implementation 'top.yukonga.miuix.kmp:miuix-ui-android:0.9.3'
+    implementation 'io.github.libxposed:service:102.0.0'
+    compileOnly 'io.github.libxposed:api:102.0.0'
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20260814'
+}

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="synology_logo_background">#FF4A4A4C</color>
+    <color name="synology_logo_foreground">#FFFFFFFF</color>
+</resources>

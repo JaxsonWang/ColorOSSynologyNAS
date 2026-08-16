@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ColorOS 群晖 NAS</string>
+    <string name="screen_title">群晖 NAS</string>
+    <string name="xposed_description">在 ColorOS 自带相册中浏览和直接预览 DSM 7 图片。</string>
+    <string name="remote_preview">远程预览</string>
+    <string name="dsm_configuration">DSM 配置</string>
+    <string name="server_label">DSM 地址</string>
+    <string name="username_label">用户名</string>
+    <string name="password_label">密码</string>
+    <string name="otp_label">OTP</string>
+    <string name="remote_root_label">图片目录</string>
+    <string name="backup_enabled_label">备份照片</string>
+    <string name="backup_folder_label">备份文件夹</string>
+    <string name="save_and_connect">保存并连接</string>
+    <string name="status_ready">未连接</string>
+    <string name="status_configured">已配置</string>
+    <string name="status_testing">正在连接 DSM…</string>
+    <string name="status_connected">已连接</string>
+    <string name="status_error">操作失败：%1$s</string>
+</resources>
