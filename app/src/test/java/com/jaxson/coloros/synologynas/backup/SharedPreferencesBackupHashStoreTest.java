@@ -7,9 +7,12 @@ import org.junit.Test;
 import static org.junit.Assert.assertNotEquals;
 
 public final class SharedPreferencesBackupHashStoreTest {
+    /** 验证不同备份目录使用彼此隔离的本地哈希索引作用域 */
     @Test
     public void isolatesHashIndexByConfiguredBackupFolder() {
+        // 创建使用默认备份目录的第一份配置
         SynologyConfig first = config("ColorOS Backup");
+        // 创建仅备份目录不同的第二份配置
         SynologyConfig second = config("Family Backup");
 
         assertNotEquals(
@@ -18,6 +21,12 @@ public final class SharedPreferencesBackupHashStoreTest {
         );
     }
 
+    /**
+     * 创建仅备份目录可变的固定群晖测试配置
+     *
+     * @param backupFolder 参与哈希索引作用域计算的备份目录
+     * @return 固定连接身份和根目录的群晖配置
+     */
     private static SynologyConfig config(String backupFolder) {
         return new SynologyConfig(
                 "https://nas.example.test",

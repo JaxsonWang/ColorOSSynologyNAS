@@ -2,87 +2,81 @@ package com.jaxson.coloros.synologynas.gallery;
 
 import android.util.Log;
 
-import com.jaxson.coloros.synologynas.backup.BackupUploadResult;
-
-import java.lang.reflect.Constructor;
+import java.io.IOException;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.WeakHashMap;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.IntSupplier;
-import java.util.logging.Level;
-import java.util.logging.Logger;
 
 public final class ColorOsNasProviderProxy implements InvocationHandler {
+    // 标识日志所属模块，便于从相册进程日志中筛选群晖调用
+    private static final String TAG = "ColorOSSynologyNAS";
+    // 定位 ColorOS 相册用于复用原生 NAS 页面体系的 Provider 枚举
     private static final String NAS_PROVIDER =
             "com.oplus.gallery.business_lib.nas.NasProvider";
-    private static final String NAS_PHOTO_INFO =
-            "com.oplus.gallery.business_lib.nas.NasPhotoInfo";
-    private static final String NAS_PHOTO_MEDIA_TYPE = NAS_PHOTO_INFO + "$MediaType";
-    private static final String NAS_PHOTO_LIVE_TYPE = NAS_PHOTO_INFO + "$LivePhotoType";
+    // 定位 ColorOS 相册用于表达 NAS Photos 可用性的枚举
     private static final String NAS_AVAILABILITY =
             "com.oplus.gallery.business_lib.nas.NasPhotosAvailabilityStatus";
+    // 定位 ColorOS 相册用于表达 NAS Photos 运行状态的枚举
     private static final String NAS_APP_STATUS =
             "com.oplus.gallery.business_lib.nas.NasPhotosAppStatus";
-    private static final String ALBUM_DTO = "com.oplus.aiunit.vision.b3q";
-    private static final String DOWNLOAD_PROGRESS = "com.oplus.aiunit.vision.wac";
-    private static final String DOWNLOAD_HANDLE = "com.oplus.aiunit.vision.z8g";
-    private static final String BACKUP_HASH_RESULT = "com.oplus.aiunit.vision.yjq";
-    private static final String BACKUP_UPLOAD_RESULT = "com.oplus.aiunit.vision.teq";
-    private static final String BACKUP_PATH = "com.oplus.aiunit.vision.ycq";
-    private static final String BACKUP_UPLOAD_ERROR =
-            "com.oplus.gallery.framework.abilities.cloudsync.nas.api.model."
-                    + "NasBackupUploadErrorCode";
-    private static final String TAG = "ColorOSSynologyNAS";
-    private static final Logger LOGGER = Logger.getLogger(TAG);
 
-    private static final Set<Object> SYNTHETIC_DOWNLOADS = Collections.synchronizedSet(
-            Collections.newSetFromMap(new WeakHashMap<>())
-    );
-
+    // 保留原飞牛 Provider，非群晖请求必须原样转发到该实例
     private final Object original;
-    private final ClassLoader galleryClassLoader;
+    // 执行群晖相册浏览、预览与删除请求
     private final GalleryRemoteClient client;
+    // 执行群晖备份可用性、查重与上传请求
     private final GalleryBackupService backupService;
+    // 保留 FEINIU 枚举槽位，以复用 ColorOS 原生 NAS 页面
     private final Object feiniuProvider;
+    // 提供相册进程已经缓存的照片数量，避免统计接口触发远端扫描
     private final IntSupplier photoCount;
+    // 将内部相册模型映射为当前 ColorOS 私有 DTO
+    private final ColorOsNasDtoMapper dtoMapper;
+    // 将备份领域结果映射为当前 ColorOS 私有 DTO
+    private final ColorOsNasBackupResultMapper backupResultMapper;
+    // 构造 ColorOS 原图下载完成句柄并维护取消抑制集合
+    private final ColorOsNasDownloadAdapter downloadAdapter;
 
+    // 绑定原 Provider、群晖客户端和当前 ColorOS 私有反射合约
     private ColorOsNasProviderProxy(
-            GalleryRemoteClient client,
-            GalleryBackupService backupService,
-            Object original,
-            ClassLoader classLoader,
-            IntSupplier photoCount
-    )
-            throws ReflectiveOperationException {
+            GalleryRemoteClient client, // 执行群晖远端图库操作的客户端
+            GalleryBackupService backupService, // 执行群晖备份操作的服务
+            Object original, // 接收非群晖请求的原飞牛 Provider
+            ClassLoader classLoader, // 解析 ColorOS 私有类型的相册类加载器
+            IntSupplier photoCount // 读取相册侧缓存照片数的供应器
+    ) throws ReflectiveOperationException {
         this.original = original;
-        galleryClassLoader = classLoader;
         this.client = client;
         this.backupService = backupService;
         this.photoCount = photoCount;
-        feiniuProvider = enumValue(NAS_PROVIDER, "FEINIU");
+        feiniuProvider = ColorOsNasReflection.enumValue(
+                classLoader,
+                NAS_PROVIDER,
+                "FEINIU"
+        );
+        dtoMapper = new ColorOsNasDtoMapper(classLoader, feiniuProvider);
+        backupResultMapper = new ColorOsNasBackupResultMapper(classLoader, backupService);
+        downloadAdapter = new ColorOsNasDownloadAdapter(classLoader);
     }
 
+    // 创建实现 ColorOS dpk 接口的群晖动态代理，同时保留原 Provider 转发链路
     public static Object create(
-            GalleryRemoteClient client,
-            GalleryBackupService backupService,
-            Object original,
-            ClassLoader classLoader,
-            IntSupplier photoCount
-    )
-            throws ReflectiveOperationException {
+            GalleryRemoteClient client, // 执行群晖远端图库操作的客户端
+            GalleryBackupService backupService, // 执行群晖备份操作的服务
+            Object original, // 接收非群晖请求的原飞牛 Provider
+            ClassLoader classLoader, // 解析 ColorOS 私有类型的相册类加载器
+            IntSupplier photoCount // 读取相册侧缓存照片数的供应器
+    ) throws ReflectiveOperationException {
+        // 约束代理只实现当前相册版本的 dpk Provider 接口
         Class<?> providerInterface = Class.forName(
                 "com.oplus.aiunit.vision.dpk",
                 false,
                 classLoader
         );
+        // 承载群晖分流与原 Provider 转发语义的调用处理器
         ColorOsNasProviderProxy handler = new ColorOsNasProviderProxy(
                 client,
                 backupService,
@@ -97,24 +91,33 @@ public final class ColorOsNasProviderProxy implements InvocationHandler {
         );
     }
 
-    public static boolean isSynologyProvider(Object value) {
+    // 判断 Provider 是否已经由本模块替换，避免重复包装原 Provider
+    public static boolean isSynologyProvider(Object value /* 待识别的 Provider 实例 */) {
         if (value == null || !Proxy.isProxyClass(value.getClass())) {
             return false;
         }
         return Proxy.getInvocationHandler(value) instanceof ColorOsNasProviderProxy;
     }
 
-    public static boolean shouldSuppressCancel(Object value) {
-        return SYNTHETIC_DOWNLOADS.remove(value);
+    // 消费一次合成下载句柄标记，使 ColorOS 的后续 cancel 调用直接结束
+    public static boolean shouldSuppressCancel(Object value /* 待取消的原图下载句柄 */) {
+        return ColorOsNasDownloadAdapter.shouldSuppressCancel(value);
     }
 
+    // 返回当前群晖配置状态，供 Provider 注册表和设备入口判断
     public boolean isConfigured() {
         return client.isConfigured();
     }
 
     @Override
     @SuppressWarnings("unchecked")
-    public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+    // 按 dpk 方法名和目标设备精确分流群晖请求，其余调用转发原 Provider
+    public Object invoke(
+            Object proxy, // JVM 创建并回传给调用处理器的动态代理
+            Method method, // ColorOS 当前调用的 dpk 或 Object 方法
+            Object[] args // ColorOS 按当前私有合约传入的原始参数
+    ) throws Throwable {
+        // 使用混淆后的方法名匹配当前 16.50.8 Provider 合约
         String name = method.getName();
         if (method.getDeclaringClass() == Object.class) {
             return invokeObjectMethod(proxy, name, args);
@@ -132,24 +135,24 @@ public final class ColorOsNasProviderProxy implements InvocationHandler {
         return switch (name) {
             case "a" -> getAlbum((String) args[1]);
             case "d" -> backupService.isEnabled() ? 1 : 0;
-            case "e" -> enumValue(
+            case "e" -> dtoMapper.enumValue(
                     NAS_AVAILABILITY,
                     client.isConfigured() ? "AVAILABLE" : "UNKNOWN"
             );
             case "g" -> 0L;
             case "h" -> null;
-            case "i" -> hashResult((List<String>) args[1]);
+            case "i" -> backupResultMapper.hashResult((List<String>) args[1]);
             case "j", "q", "u" -> null;
-            case "k", "r" -> upload(args[0]);
+            case "k", "r" -> backupResultMapper.upload(args[0]);
             case "l" -> listAlbums((Integer) args[0], (Integer) args[1]);
             case "m" -> backupService.isEnabled() ? 1 : 0;
-            case "n" -> enumValue(
+            case "n" -> dtoMapper.enumValue(
                     NAS_APP_STATUS,
                     client.isConfigured() ? "RUNNING" : "STOPPED"
             );
-            case "o" -> galleryStats();
+            case "o" -> dtoMapper.galleryStats(photoCount.getAsInt());
             case "p" -> deletePhotos((List<String>) args[1]);
-            case "s" -> hashResult((List<String>) args[1]);
+            case "s" -> backupResultMapper.hashResult((List<String>) args[1]);
             case "t" -> listPhotos(
                     (String) args[3],
                     (Integer) args[0],
@@ -162,7 +165,12 @@ public final class ColorOsNasProviderProxy implements InvocationHandler {
         };
     }
 
-    private Object invokeObjectMethod(Object proxy, String name, Object[] args) {
+    // 保持动态代理的 Object 基础语义与原实现一致
+    private Object invokeObjectMethod(
+            Object proxy, // JVM 创建的动态代理实例
+            String name, // 当前 Object 方法名
+            Object[] args // Object 方法的原始参数
+    ) {
         return switch (name) {
             case "toString" -> "SynologyDsm7NasProviderProxy";
             case "hashCode" -> System.identityHashCode(proxy);
@@ -171,7 +179,11 @@ public final class ColorOsNasProviderProxy implements InvocationHandler {
         };
     }
 
-    private boolean targetsSynology(String methodName, Object[] args) {
+    // 根据各 dpk 方法的参数位置判断本次请求是否明确指向群晖设备
+    private boolean targetsSynology(
+            String methodName, // 当前混淆后的 dpk 方法名
+            Object[] args // 用于读取设备标识或备份请求 DTO 的参数
+    ) {
         if (args == null) {
             return false;
         }
@@ -180,10 +192,11 @@ public final class ColorOsNasProviderProxy implements InvocationHandler {
                 return GalleryContract.DEVICE_ID.equals(
                         GalleryBackupClient.targetDeviceId(args[0])
                 );
-            } catch (ReflectiveOperationException error) {
+            } catch (ReflectiveOperationException error /* 备份目标设备解析异常 */) {
                 throw new IllegalStateException("ColorOS 备份请求目标设备解析失败", error);
             }
         }
+        // 指向设备标识在当前方法参数列表中的固定位置
         int deviceIndex = switch (methodName) {
             case "l", "t" -> 2;
             default -> 0;
@@ -192,313 +205,85 @@ public final class ColorOsNasProviderProxy implements InvocationHandler {
                 && GalleryContract.DEVICE_ID.equals(args[deviceIndex]);
     }
 
-    private Object invokeOriginal(Method interfaceMethod, Object[] args) throws Throwable {
+    // 将不属于群晖设备的调用原样交还飞牛 Provider，并透传其真实异常
+    private Object invokeOriginal(
+            Method interfaceMethod, // dpk 接口上由 ColorOS 调用的方法
+            Object[] args // 不经改写转发给原 Provider 的参数
+    ) throws Throwable {
         try {
             return interfaceMethod.invoke(original, args);
-        } catch (InvocationTargetException error) {
+        } catch (InvocationTargetException error /* 原 Provider 包装的真实调用异常 */) {
             throw error.getCause() == null ? error : error.getCause();
         }
     }
 
-    private Object getAlbum(String albumId) throws Exception {
+    // 读取单个群晖相册并映射为 ColorOS 相册 DTO
+    private Object getAlbum(String albumId /* 远端相册稳定标识 */)
+            throws IOException, ReflectiveOperationException {
         Log.i(TAG, "DSM get album");
-        return album(client.getAlbum(albumId));
+        return dtoMapper.album(client.getAlbum(albumId));
     }
 
-    private List<Object> listAlbums(int offset, int limit) throws Exception {
+    // 分页读取群晖相册并映射为 ColorOS 相册 DTO
+    private List<Object> listAlbums(int offset /* 起始偏移 */, int limit /* 最大数量 */)
+            throws IOException, ReflectiveOperationException {
         Log.i(TAG, "DSM list albums");
-        return albums(client.listAlbums(offset, limit));
+        return dtoMapper.albums(client.listAlbums(offset, limit));
     }
 
-    private List<Object> listPhotos(String albumId, int offset, int limit) throws Exception {
+    // 分页读取指定群晖相册的照片并映射为 ColorOS 照片 DTO
+    private List<Object> listPhotos(
+            String albumId, // 远端相册的稳定标识
+            int offset, // ColorOS 请求的照片起始偏移
+            int limit // ColorOS 请求的照片最大数量
+    ) throws IOException, ReflectiveOperationException {
         Log.i(TAG, "DSM list photos");
-        return photos(client.listPhotos(albumId, offset, limit));
+        return dtoMapper.photos(client.listPhotos(albumId, offset, limit));
     }
 
-    private Object galleryStats() throws ReflectiveOperationException {
-        int cachedPhotoCount = photoCount.getAsInt();
-        return ColorOsGalleryBridge.galleryStats(galleryClassLoader, cachedPhotoCount);
-    }
-
-    private Object hashResult(List<String> hashes) throws ReflectiveOperationException {
-        try {
-            Set<String> existing = backupService.findExistingHashes(hashes);
-            LOGGER.info("DSM backup hash query completed: requested="
-                    + hashes.size() + ", existing=" + existing.size());
-            Class<?> type = Class.forName(
-                    BACKUP_HASH_RESULT + "$b",
-                    false,
-                    galleryClassLoader
-            );
-            Constructor<?> constructor = type.getDeclaredConstructor(Set.class);
-            constructor.setAccessible(true);
-            return constructor.newInstance(existing);
-        } catch (ReflectiveOperationException error) {
-            throw error;
-        } catch (Exception error) {
-            LOGGER.log(Level.WARNING, "DSM backup hash query failed", error);
-            Class<?> type = Class.forName(
-                    BACKUP_HASH_RESULT + "$a",
-                    false,
-                    galleryClassLoader
-            );
-            Constructor<?> constructor = type.getDeclaredConstructor(int.class, String.class);
-            constructor.setAccessible(true);
-            return constructor.newInstance(-1, errorMessage(error));
-        }
-    }
-
-    private Object upload(Object colorOsRequest) throws ReflectiveOperationException {
-        BackupUploadResult result = backupService.upload(colorOsRequest);
-        if (result.status() == BackupUploadResult.Status.SUCCESS) {
-            LOGGER.info("DSM backup upload completed: bytes=" + result.bytesWritten());
-            return uploadSuccess(result);
-        }
-        String errorCode = result.status() == BackupUploadResult.Status.ALREADY_EXISTS
-                ? "FILE_ALREADY_EXISTS"
-                : result.errorCode().name();
-        LOGGER.warning("DSM backup upload result: code=" + errorCode
-                + ", message=" + result.message());
-        return uploadFailure(errorCode, result.message());
-    }
-
-    private Object uploadSuccess(BackupUploadResult result)
-            throws ReflectiveOperationException {
-        Class<?> pathType = Class.forName(BACKUP_PATH, false, galleryClassLoader);
-        Constructor<?> pathConstructor = pathType.getDeclaredConstructor(
-                String.class,
-                String.class,
-                long.class,
-                long.class,
-                boolean.class
-        );
-        pathConstructor.setAccessible(true);
-        Object backupPath = pathConstructor.newInstance(
-                result.backupFolder(),
-                result.backupFolder(),
-                0L,
-                0L,
-                true
-        );
-
-        Class<?> resultType = Class.forName(
-                BACKUP_UPLOAD_RESULT + "$b",
-                false,
-                galleryClassLoader
-        );
-        Constructor<?> resultConstructor = resultType.getDeclaredConstructor(
-                pathType,
-                String.class,
-                long.class,
-                int.class,
-                int.class,
-                ArrayList.class
-        );
-        resultConstructor.setAccessible(true);
-        return resultConstructor.newInstance(
-                backupPath,
-                result.savedPath(),
-                result.bytesWritten(),
-                1,
-                0,
-                new ArrayList<>()
-        );
-    }
-
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private Object uploadFailure(String errorCode, String message)
-            throws ReflectiveOperationException {
-        Class<?> errorType = Class.forName(BACKUP_UPLOAD_ERROR, false, galleryClassLoader);
-        Object code = Enum.valueOf((Class<? extends Enum>) errorType, errorCode);
-        Class<?> resultType = Class.forName(
-                BACKUP_UPLOAD_RESULT + "$a",
-                false,
-                galleryClassLoader
-        );
-        Constructor<?> constructor = resultType.getDeclaredConstructor(
-                errorType,
-                String.class,
-                Integer.class
-        );
-        constructor.setAccessible(true);
-        return constructor.newInstance(code, message, null);
-    }
-
-    private static String errorMessage(Throwable error) {
-        String message = error.getMessage();
-        return message == null || message.isBlank()
-                ? error.getClass().getSimpleName()
-                : message;
-    }
-
-    private byte[] thumbnail(String photoId, Object colorOsSize) throws Exception {
+    // 按 ColorOS 尺寸枚举读取群晖缩略图字节
+    private byte[] thumbnail(
+            String photoId, // 远端照片的稳定标识
+            Object colorOsSize // ColorOS 私有缩略图尺寸枚举
+    ) throws IOException {
         Log.i(TAG, "DSM load thumbnail");
-        return client.getThumbnail(photoId, thumbnailSize(colorOsSize));
+        return client.getThumbnail(
+                photoId,
+                ColorOsNasDownloadAdapter.thumbnailSize(colorOsSize)
+        );
     }
 
-    private boolean deletePhotos(List<String> photoIds) {
+    // 将群晖原图同步流入 ColorOS 回调并返回已完成的合成下载句柄
+    private Object download(
+            String photoId, // 远端照片的稳定标识
+            Object callback // ColorOS 接收原图分块与完成标记的回调
+    ) throws IOException, ReflectiveOperationException {
+        Log.i(TAG, "DSM stream original");
+        // 记录已通过回调写入 ColorOS 的原图总字节数
+        long bytes = client.streamOriginal(photoId, callback);
+        return downloadAdapter.completedHandle(photoId, bytes);
+    }
+
+    // 删除群晖远端照片，失败时按当前 dpk 布尔合约返回 false
+    private boolean deletePhotos(List<String> photoIds /* 待删除的远端照片标识 */) {
         Log.i(TAG, "DSM delete photos");
         try {
+            // 表示 DSM 是否已确认全部目标照片删除成功
             boolean deleted = client.deletePhotos(photoIds);
             if (deleted) {
                 Log.i(TAG, "DSM delete photos completed");
             }
             return deleted;
-        } catch (Exception error) {
+        } catch (IOException error /* DSM 删除或清单失效异常 */) {
             Log.e(
                     TAG,
                     "DSM delete photos failed: "
                             + error.getClass().getSimpleName()
                             + ": "
-                            + errorMessage(error),
+                            + ColorOsNasReflection.errorMessage(error),
                     error
             );
             return false;
         }
-    }
-
-    private List<Object> albums(List<RemoteAlbum> albums) throws ReflectiveOperationException {
-        List<Object> result = new ArrayList<>(albums.size());
-        for (RemoteAlbum album : albums) {
-            result.add(album(album));
-        }
-        return result;
-    }
-
-    private Object album(RemoteAlbum album) throws ReflectiveOperationException {
-        Class<?> type = Class.forName(ALBUM_DTO, false, galleryClassLoader);
-        Constructor<?> constructor = type.getDeclaredConstructors()[0];
-        constructor.setAccessible(true);
-        return constructor.newInstance(
-                feiniuProvider,
-                album.galleryId(),
-                album.id(),
-                album.name(),
-                GalleryContract.DEVICE_ID,
-                album.imageCount(),
-                0,
-                album.coverPhotoId(),
-                album.coverGalleryId(),
-                album.updateTimeMillis()
-        );
-    }
-
-    private List<Object> photos(List<RemotePhoto> photos) throws ReflectiveOperationException {
-        List<Object> result = new ArrayList<>(photos.size());
-        Class<?> type = Class.forName(NAS_PHOTO_INFO, false, galleryClassLoader);
-        Constructor<?> constructor = type.getDeclaredConstructors()[0];
-        constructor.setAccessible(true);
-        Object image = enumValue(NAS_PHOTO_MEDIA_TYPE, "IMAGE");
-        Object noLivePhoto = enumValue(NAS_PHOTO_LIVE_TYPE, "NONE");
-        for (RemotePhoto photo : photos) {
-            result.add(constructor.newInstance(
-                    photo.galleryId(),
-                    photo.id(),
-                    GalleryContract.DEVICE_ID,
-                    photo.media().name(),
-                    photo.media().size(),
-                    null,
-                    null,
-                    photo.media().mimeType(),
-                    photo.media().modifiedSeconds() * 1_000L,
-                    image,
-                    noLivePhoto,
-                    false,
-                    0
-            ));
-        }
-        return result;
-    }
-
-    private Object download(String photoId, Object callback) throws Exception {
-        Log.i(TAG, "DSM stream original");
-        long bytes = client.streamOriginal(photoId, callback);
-        Object progress = newDownloadProgress(photoId, bytes);
-        Object channel = newCompletedChannel(progress);
-
-        Class<?> type = Class.forName(DOWNLOAD_HANDLE, false, galleryClassLoader);
-        Constructor<?> constructor = type.getDeclaredConstructors()[0];
-        constructor.setAccessible(true);
-        Object handle = constructor.newInstance(
-                channel,
-                new AtomicReference<>(),
-                null,
-                null,
-                GalleryContract.DEVICE_ID,
-                photoId
-        );
-        SYNTHETIC_DOWNLOADS.add(handle);
-        return handle;
-    }
-
-    private Object newDownloadProgress(String photoId, long bytes)
-            throws ReflectiveOperationException {
-        Class<?> type = Class.forName(DOWNLOAD_PROGRESS, false, galleryClassLoader);
-        Constructor<?> constructor = type.getDeclaredConstructor(
-                String.class,
-                long.class,
-                long.class,
-                int.class,
-                boolean.class
-        );
-        constructor.setAccessible(true);
-        return constructor.newInstance(photoId, bytes, bytes, 100, true);
-    }
-
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private Object newCompletedChannel(Object progress) throws ReflectiveOperationException {
-        Class<?> channelKt = Class.forName(
-                "kotlinx.coroutines.channels.ChannelKt",
-                false,
-                galleryClassLoader
-        );
-        Class<?> overflowType = Class.forName(
-                "kotlinx.coroutines.channels.BufferOverflow",
-                false,
-                galleryClassLoader
-        );
-        Class<?> function1 = Class.forName(
-                "kotlin.jvm.functions.Function1",
-                false,
-                galleryClassLoader
-        );
-        Object suspend = Enum.valueOf((Class<? extends Enum>) overflowType, "SUSPEND");
-        Method channelFactory = channelKt.getMethod(
-                "Channel",
-                int.class,
-                overflowType,
-                function1
-        );
-        Object channel = channelFactory.invoke(null, Integer.MAX_VALUE, suspend, null);
-
-        Method trySend = null;
-        for (Method candidate : channel.getClass().getMethods()) {
-            if (candidate.getName().startsWith("trySend")
-                    && candidate.getParameterCount() == 1) {
-                trySend = candidate;
-                break;
-            }
-        }
-        if (trySend == null) {
-            throw new NoSuchMethodException("Channel.trySend");
-        }
-        trySend.setAccessible(true);
-        trySend.invoke(channel, progress);
-        Method close = channel.getClass().getMethod("close", Throwable.class);
-        close.invoke(channel, new Object[]{null});
-        return channel;
-    }
-
-    private String thumbnailSize(Object colorOsSize) {
-        return "THUMBNAIL_SIZE_L".equals(String.valueOf(colorOsSize))
-                ? GalleryContract.THUMBNAIL_LARGE
-                : GalleryContract.THUMBNAIL_SMALL;
-    }
-
-    @SuppressWarnings({"unchecked", "rawtypes"})
-    private Object enumValue(String className, String value)
-            throws ReflectiveOperationException {
-        Class<?> type = Class.forName(className, false, galleryClassLoader);
-        return Enum.valueOf((Class<? extends Enum>) type, value);
     }
 }

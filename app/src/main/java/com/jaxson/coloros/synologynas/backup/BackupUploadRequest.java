@@ -1,31 +1,29 @@
 package com.jaxson.coloros.synologynas.backup;
 
-import java.util.ArrayList;
-import java.util.List;
-
 public final class BackupUploadRequest {
-    private final String targetDeviceUserId;
-    private final String phoneDeviceId;
-    private final String phoneDeviceName;
+    // 保存 ColorOS 相册提供的照片原始文件名
     private final String originalName;
+    // 保存 ColorOS 相册报告的照片字节数
     private final long fileSize;
+    // 保存可重复打开照片数据的输入源，以支持校验和上传两次读取
     private final BackupInputSource inputSource;
+    // 保存经过格式校验的 ColorOS SHA-256 原生哈希
     private final ColorOsFileHash fileHash;
-    private final List<String> deviceAlbumNames;
 
+    /**
+     * 创建不可变的单张照片备份请求并校验核心 ColorOS 合约字段
+     *
+     * @param originalName 照片原始文件名
+     * @param fileSize 非负照片字节数
+     * @param inputSource 可重复打开照片数据的输入源
+     * @param fileHash ColorOS 提供的 SHA-256 原生哈希
+     */
     public BackupUploadRequest(
-            String targetDeviceUserId,
-            String phoneDeviceId,
-            String phoneDeviceName,
             String originalName,
             long fileSize,
             BackupInputSource inputSource,
-            String fileHash,
-            List<String> deviceAlbumNames
+            String fileHash
     ) {
-        this.targetDeviceUserId = requireText(targetDeviceUserId, "目标 NAS 设备 ID");
-        this.phoneDeviceId = requireText(phoneDeviceId, "手机设备 ID");
-        this.phoneDeviceName = phoneDeviceName == null ? "" : phoneDeviceName.trim();
         this.originalName = requireText(originalName, "照片文件名");
         if (fileSize < 0L) {
             throw new IllegalArgumentException("照片大小不能为负数");
@@ -36,12 +34,17 @@ public final class BackupUploadRequest {
         this.fileSize = fileSize;
         this.inputSource = inputSource;
         this.fileHash = ColorOsFileHash.parse(fileHash);
-        this.deviceAlbumNames = deviceAlbumNames == null
-                ? List.of()
-                : List.copyOf(new ArrayList<>(deviceAlbumNames));
     }
 
+    /**
+     * 规范化并校验备份请求中的必填文本
+     *
+     * @param value 待规范化文本
+     * @param fieldName 用于明确失败字段的中文名称
+     * @return 去除首尾空白后的非空文本
+     */
     private static String requireText(String value, String fieldName) {
+        // 保存统一去除首尾空白后的请求文本
         String normalized = value == null ? "" : value.trim();
         if (normalized.isEmpty()) {
             throw new IllegalArgumentException(fieldName + "不能为空");
@@ -49,39 +52,28 @@ public final class BackupUploadRequest {
         return normalized;
     }
 
-    public String targetDeviceUserId() {
-        return targetDeviceUserId;
-    }
-
-    public String phoneDeviceId() {
-        return phoneDeviceId;
-    }
-
-    public String phoneDeviceName() {
-        return phoneDeviceName;
-    }
-
+    /** @return ColorOS 相册提供的照片原始文件名 */
     public String originalName() {
         return originalName;
     }
 
+    /** @return ColorOS 相册报告的照片字节数 */
     public long fileSize() {
         return fileSize;
     }
 
+    /** @return 可为校验和上传分别打开照片流的输入源 */
     public BackupInputSource inputSource() {
         return inputSource;
     }
 
+    /** @return 经过格式校验的 ColorOS SHA-256 原生哈希 */
     public String fileHash() {
         return fileHash.value();
     }
 
+    /** @return 用于稳定解决同名冲突的完整原生哈希后缀 */
     public String stableHashSuffix() {
         return fileHash.stableSuffix();
-    }
-
-    public List<String> deviceAlbumNames() {
-        return deviceAlbumNames;
     }
 }

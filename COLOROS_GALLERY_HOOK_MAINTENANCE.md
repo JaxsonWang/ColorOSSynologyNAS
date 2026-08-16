@@ -134,14 +134,11 @@ MainActivity
 ```
 
 真实 NAS 型号在用户点击“保存并连接”时获取并缓存，而不是在相册首页或卡片绑定时同步访问
-DSM。这一约束直接关系到相册首次进入和“图集”页签响应速度。
+DSM。`SynologyApplication` 在服务绑定时只发布已有配置，不补发 DSM 网络请求。这一约束直接
+关系到相册首次进入和“图集”页签响应速度，也避免服务绑定刷新与用户保存配置发生竞争。
 
-旧配置缺少备份字段时按以下默认值迁移：
-
-```text
-backupEnabled = true
-backupFolder = "ColorOS Backup"
-```
+RemotePreferences 配置必须同时包含服务地址、用户名、密码、OTP、图片根目录、设备型号、
+备份开关和备份文件夹；任一字段缺失都明确返回配置格式错误，不迁移或补默认字段。
 
 ### 3.3 备份上传链路
 
@@ -162,7 +159,8 @@ ColorOS NasBackupUploadRequest (seq)
 - 通过 DSM 远端 MD5 判断内容是否已存在；
 - 同内容不重复上传；
 - 同名但不同内容时使用稳定 hash 后缀；
-- 只有上传成功后才写入本地 hash 索引；
+- 原始文件名规范化后没有可用字符时直接失败，不生成默认文件名；
+- 只有 DSM 上传响应明确返回 `success: true` 后才写入本地 hash 索引，HTTP 2xx 本身不算成功；
 - 将结果映射为 ColorOS 的 `yjq`、`teq` 和 `ycq`；
 - 错误返回失败结果，不伪造成功。
 
@@ -202,10 +200,10 @@ Application.attach() interceptor
   ├─ 再次校验 package/process/versionCode
   └─ installTargetHooks(...)
        ├─ 初始化 RemoteConfigStore / 浏览 / 状态 / 备份客户端
-       ├─ initializeNasState()
-       ├─ resolveHookTargets()
-       ├─ installFeatureHooks()
-       ├─ installDeleteDialogHooks()
+       ├─ SynologyNasHookState.initialize()
+       ├─ HookTargetResolver.resolve()
+       ├─ GalleryHookInstaller.installFeatureHooks()
+       ├─ DeleteDialogHookInstaller.install()
        ├─ installProviderHooks()
        ├─ installNasPreloadHook()
        ├─ installGalleryHomeHook()
@@ -215,7 +213,7 @@ Application.attach() interceptor
        └─ installGalleryCardHooks()
 ```
 
-`resolveHookTargets()` 会先解析一整批类、方法和构造器。任何一个目标解析失败都会让本批目标
+`HookTargetResolver.resolve()` 会先解析一整批类、方法和构造器。任何一个目标解析失败都会让本批目标
 Hook 安装失败并记录 `hook target resolution failed`。因此相册升级时必须完整核对全部反射
 合约，不能看到第一个崩溃点后只修一个方法名。
 
@@ -353,11 +351,8 @@ deviceUserId == "synology-dsm7"
 | 群晖设备未配置 | 打开模块配置页 |
 | 非群晖设备 | `chain.proceed()` |
 
-模块配置页通过以下 extra 确认入口设备：
-
-```java
-MainActivity.EXTRA_DEVICE_USER_ID = "device_user_id";
-```
+群晖分支直接启动唯一的模块 `MainActivity` 配置页；页面没有按入口设备分流，也不携带未消费的
+Intent extra。
 
 `actionFlags == 20` 是当前版本的反编译结论，新版必须重新确认。
 
@@ -428,17 +423,15 @@ com.oplus.aiunit.vision.mgq.f(String deviceUserId)
 - 标记 `hasStoredSynologyMetadata = true`；
 - 为启动元数据预加载跳过逻辑提供依据。
 
-当前照片数量字段依次尝试：
+当前统计字段按 `16.50.8` DEX 原始名称精确读取：
 
 ```text
-photoCount
-a
-f13529a
-首个非 static int 字段
+jjq.a → photoCount
+jjq.b → videoCount
 ```
 
-最后一项只是当前兼容手段，不是稳定合约；新版必须通过构造器、字段使用点和数据库映射重新
-确认真实字段。
+JADX 生成的别名和测试可读字段名不进入运行时代码；新版必须通过构造器、字段使用点和数据库
+映射重新确认 DEX 原始字段。
 
 ### 5.7 连接状态 StateFlow
 
@@ -470,7 +463,8 @@ ColorOSSynologyNAS-status
 ```
 
 `AtomicBoolean nasStatusRefreshInFlight` 防止重复探测；Hook 本身先返回现有 Flow，后台结果再
-更新 Flow、型号、状态和统计数据。
+更新 Flow、型号、状态和统计数据。冷启动时“已有配置”只恢复缓存型号，不等同于“已连接”；
+连接状态保持 `false`，直到本次 DSM 探测明确成功。
 
 **升级验收不变量：进入相册后必须能够立即点击“图集”，相册主线程不能等待 DSM 网络请求。**
 
@@ -526,7 +520,7 @@ onResult.invoke(false)
 避免相册通过原飞牛设备存在性检查把合成群晖设备判定为已移除，然后退出 NAS 页面。其他设备
 继续执行原方法。
 
-这里的 `Function1.invoke(Object)` 由 `resolveHookTargets()` 反射解析并调用，但它本身不是
+这里的 `Function1.invoke(Object)` 由 `HookTargetResolver.resolve()` 反射解析并调用，但它本身不是
 一个 Hook 点。
 
 ### 5.10 NAS 卡片绑定和群晖品牌样式
@@ -570,6 +564,9 @@ model               = DS220+ 等已缓存真实型号
 status              = 已连接 / 未连接
 ```
 
+卡片、首页和设备列表读取同一个 `SynologyNasHookState` 型号来源，不从 binding 文案或第二份
+缓存反向覆盖设备型号。
+
 Logo 背景 drawable 的圆角为 `3dp`。主题色：
 
 | 主题 | Background | Foreground |
@@ -590,14 +587,16 @@ com.oplus.aiunit.vision.h9q.l(
 )
 ```
 
-原方法完成后，若 `h9q.T == "synology-dsm7"`，重新写入群晖型号和状态：
+原方法完成后先读取当前 binding 的 `h9q.T`。只有它等于 `synology-dsm7` 时，才用本次
+availability 更新 `SynologyNasHookState`，再从该唯一状态源重新写入群晖型号和状态：
 
 ```text
 state == 1 → 已连接
 其他/null → 未连接
 ```
 
-这一步防止相册原飞牛状态绑定覆盖群晖机型和连接文案。
+非群晖 binding 保持原方法结果，不得修改群晖全局状态。这一步同时防止其他 NAS 状态污染和
+相册原飞牛状态绑定覆盖群晖机型、连接文案。
 
 ### 5.12 合成原图下载句柄的 cancel
 
@@ -654,7 +653,7 @@ ColorOS 16.50.8 的两条删除确认框路径分别是：
 `SYNO.FileStation.Delete v2`，模块没有实现这条固定 30 天回收站合同，因此群晖弹窗不能展示
 该说明。
 
-`installDeleteDialogHooks()` 先从当前删除请求恢复 `deviceId`。仅当它等于
+`DeleteDialogHookInstaller.install()` 先从当前删除请求恢复 `deviceId`。仅当它等于
 `synology-dsm7` 时，在该弹窗协程的同步调用范围内设置嵌套安全的 `ThreadLocal` 标志；
 随后 `COUIAlertDialogBuilder.setMessage(CharSequence)` Hook 直接返回原 Builder，不调用原
 `setMessage`。这样不会生成空正文 View，同时保留：
@@ -744,7 +743,7 @@ byte[] x(String, String, ThumbnailSize);
 
 ```text
 l / t   → args[2]
-k / r   → 从 seq.a 或 seq.f24401a 解析 targetDeviceUserId
+k / r   → 从 DEX 原始字段 seq.a 解析 targetDeviceUserId
 其他方法 → 默认 args[0]
 ```
 
@@ -791,6 +790,7 @@ k / r   → 从 seq.a 或 seq.f24401a 解析 targetDeviceUserId
 | `enn.e` | `Lazy<ArrayList<首页分组>>` |
 | `e5q.a` | 首页分组类型；`4` 当前为“更多图集” |
 | `e5q.d` | `ogq` |
+| `ngq.b` | 设备列表 DTO 的 `deviceUserId` |
 | `ogq.b` | `deviceUserId` |
 | `ogq.c` | `deviceName` |
 | `ogq.d` | 设备状态 |
@@ -800,8 +800,9 @@ k / r   → 从 seq.a 或 seq.f24401a 解析 targetDeviceUserId
 | `h9q.j` | 标题 `TextView` |
 | `h9q.k` | 机型 `TextView` |
 | `h9q.l` | 状态 `TextView` |
-| `jjq.photoCount/a/f13529a` | 照片数量候选字段 |
-| `seq.a/f24401a` | `targetDeviceUserId` 候选字段 |
+| `jjq.a` | 照片数量字段 |
+| `jjq.b` | 视频数量字段 |
+| `seq.a` | `targetDeviceUserId` 字段 |
 | `seq.b/c/d/e/f/h/k` | 备份请求的路径、文件、hash、输入流等字段 |
 
 ### 7.3 关键构造器和方法形状
@@ -883,14 +884,6 @@ SYNO.FileStation.Delete v2
 app/src/main/java/com/jaxson/coloros/synologynas/dsm/DsmClient.java
 app/src/main/java/com/jaxson/coloros/synologynas/dsm/LocalThumbnailGenerator.java
 app/src/test/java/com/jaxson/coloros/synologynas/dsm/DsmThumbnailPolicyTest.java
-```
-
-当前锁定 SHA-256：
-
-```text
-a38c00f40efd0c74f37a109ab90728a733f9b9f709c26fa139147631844661db  DsmClient.java
-b27cec0264f6a7669e27f79cb0d366871fe84dcf8dd5974c19e29ed9cbc302cc  LocalThumbnailGenerator.java
-d1b339238712af3bc5c207a29148ef9e819d28d04abb564cd94c3ca29e55729a  DsmThumbnailPolicyTest.java
 ```
 
 若缩略图需求本身发生变化，应作为独立任务修改并重新真机验收，而不是在混淆名迁移中改动。
@@ -1073,8 +1066,8 @@ rg -n \
 所有合约确认后再按以下顺序修改：
 
 1. 更新 `HookPolicy.TARGET_VERSION_CODE`；
-2. 更新 `ColorOsSynologyNasModule.resolveHookTargets()`；
-3. 更新 `ColorOsGalleryBridge` 的 DTO、字段和资源映射；
+2. 更新 `HookTargetResolver.resolve()` 和 `HookTargets`；
+3. 更新 `ColorOsGalleryBridge`、`ColorOsGalleryCardBridge`、反射工具和 NAS DTO 映射器；
 4. 更新 `ColorOsNasProviderProxy` 的接口和参数分流；
 5. 如备份 DTO 变化，更新 `GalleryBackupClient`；
 6. 同步更新 `app/src/test/java/com/oplus/...` 下的相册 fixture；
@@ -1089,6 +1082,9 @@ rg -n \
 ## 11. 构建与静态验收
 
 ### 11.1 clean 回归
+
+`gradle/gradle-daemon-jvm.properties` 只声明 `toolchainVersion=21`；Launcher 和 Daemon 均使用
+Java 21，不配置并行版本选择或下载兜底。
 
 ```bash
 cd /Volumes/MacHD/Developer/AndroidStudioProjects/ColorOSSynologyNAS
@@ -1105,11 +1101,11 @@ export ANDROID_HOME=/Volumes/MacHD/Library/Android/sdk
 当前已知基线：
 
 ```text
-Unit tests: 72
+Unit tests: 86
 Failures: 0
 Errors: 0
 Lint errors: 0
-Existing lint warnings: 4
+Existing lint warnings: 3
 ```
 
 不得把 `UP-TO-DATE` 当作新版本适配的 fresh artifact，因此迁移验收使用 `clean` 和
@@ -1128,8 +1124,8 @@ app/build/outputs/apk/debug/app-debug.apk
 ```bash
 # Hook 安装和反射目标
 rg -n \
-  'resolveHookTargets|installFeatureHooks|installProviderHooks|installNasPreloadHook|installGalleryHomeHook|installEntryHook|installSyntheticDevicePresenceHook|installLabelHook|installGalleryCardHooks' \
-  app/src/main/java/com/jaxson/coloros/synologynas/ColorOsSynologyNasModule.java
+  'static HookTargets resolve|installFeatureHooks|installProviderHooks|installNasPreloadHook|installGalleryHomeHook|installEntryHook|installSyntheticDevicePresenceHook|installLabelHook|installGalleryCardHooks' \
+  app/src/main/java/com/jaxson/coloros/synologynas/{HookTargetResolver,GalleryHookInstaller}.java
 
 # Provider 特殊方法分支
 rg -n 'case "[a-z]"' \
@@ -1138,7 +1134,7 @@ rg -n 'case "[a-z]"' \
 # DTO/字段桥接
 rg -n \
   'NAS_DEVICE|GALLERY_STATS_DTO|NAS_HOME_GROUP|NAS_DEVICE_INFO|DEVICE_STATUS|NAS_VIEW_DATA|readField' \
-  app/src/main/java/com/jaxson/coloros/synologynas/gallery/ColorOsGalleryBridge.java
+  app/src/main/java/com/jaxson/coloros/synologynas/gallery/ColorOsGallery{Bridge,CardBridge,Reflection}.java
 ```
 
 检查重点不是命令有输出，而是文档、fixture、实际接口和调用点四者一致。
@@ -1230,7 +1226,7 @@ hook installation failed
 优先检查主线程：
 
 - 卡片绑定是否直接调用 `DsmClient`；
-- `initializeNasState()` 是否扩大成同步网络请求；
+- `SynologyNasHookState.initialize()` 是否扩大成同步网络请求；
 - `alq.h(...)` 是否仍立即返回 StateFlow；
 - `ynq.a(...)` 是否恢复了原飞牛群晖合成设备预加载；
 - `dpk.o(...)` 是否为了照片计数触发全量 DSM 扫描；
@@ -1271,21 +1267,38 @@ hook installation failed
 
 | 文件 | 职责 |
 |---|---|
-| `ColorOsSynologyNasModule.java` | libxposed 入口、版本门后的 Hook 安装、删除弹窗分流、状态异步刷新 |
+| `ColorOsSynologyNasModule.java` | libxposed 生命周期、版本门和 Hook 依赖装配 |
+| `HookTargetResolver.java` / `HookTargets.java` | 当前相册版本的完整私有反射目标解析与结果集合 |
+| `GalleryHookInstaller.java` | Provider、页面入口、状态、预加载、文案和卡片 Hook 安装 |
+| `DeleteDialogHookInstaller.java` | 群晖删除弹窗作用域和飞牛回收站正文抑制 |
+| `SynologyNasHookState.java` | Hook 间共享的型号、连接状态和照片统计 |
 | `HookPolicy.java` | 目标版本、能力开关、设备管理动作、删除弹窗和文案策略 |
 | `gallery/GalleryContract.java` | 群晖合成设备公共常量 |
-| `gallery/ColorOsGalleryBridge.java` | ColorOS 私有 DTO/字段/资源反射桥接 |
+| `gallery/ColorOsGalleryBridge.java` | Provider 注册、设备、首页、统计和 StateFlow 反射门面 |
+| `gallery/ColorOsGalleryCardBridge.java` | 群晖卡片资源、型号和连接状态绑定 |
+| `gallery/ColorOsGalleryReflection.java` | ColorOS 固定字段和 Provider 注册表反射操作 |
 | `gallery/ColorOsNasProviderProxy.java` | `dpk` 动态代理、群晖分流、浏览/删除/备份映射 |
+| `gallery/ColorOsNasDtoMapper.java` | 远端相册、照片和统计到 ColorOS 私有 DTO 的映射 |
+| `gallery/ColorOsNasDownloadAdapter.java` | 缩略图尺寸、原图 callback 和合成下载句柄适配 |
+| `gallery/ColorOsNasBackupResultMapper.java` | 备份 hash、上传结果和目标路径 DTO 映射 |
+| `gallery/ColorOsNasReflection.java` | Provider 私有枚举解析和失败文案提取 |
 | `gallery/GalleryRemoteClient.java` | Provider 到远端仓库的同步边界和 DTO 输入 |
-| `gallery/RemoteGalleryRepository.java` | DSM 清单快照、相册/照片转换、分页和删除 |
+| `gallery/RemoteGalleryRepository.java` | DSM 清单快照缓存、分页和删除 |
+| `gallery/RemoteGallerySnapshotFactory.java` | DSM 图片清单到相册、照片和稳定索引的转换 |
 | `gallery/GalleryBackupClient.java` | ColorOS 备份 DTO 解析与结果映射 |
 | `backup/SynologyBackupRepository.java` | hash 去重和备份上传事务规则 |
 | `backup/BackupPathPolicy.java` | 固定备份目录和文件名冲突规则 |
 | `backup/SharedPreferencesBackupHashStore.java` | 按 DSM、图片根目录和备份文件夹隔离 hash 索引 |
-| `dsm/DsmClient.java` | DSM 浏览、缩略图、下载和删除 API |
+| `dsm/DsmClient.java` | DSM 浏览门面、认证、API 发现、型号、原图和缩略图入口 |
+| `dsm/DsmMediaListing.java` | DSM 目录递归、分页和图片元数据转换 |
+| `dsm/DsmDeleteOperation.java` | `SYNO.FileStation.Delete v2` 启动、轮询和响应解析 |
+| `dsm/DsmHttpTransport.java` | 默认 TLS HTTP、JSON、文件流和资源关闭边界 |
+| `dsm/DsmParameters.java` | DSM 请求的有序参数构造 |
+| `dsm/DsmUploadBody.java` | `Upload v2` multipart 请求体和精确长度复制 |
 | `dsm/LocalThumbnailGenerator.java` | 特殊图片格式本地缩略图生成 |
-| `dsm/DsmBackupClient.java` | DSM 备份文件检查和上传 |
+| `dsm/DsmBackupClient.java` | DSM 备份认证、MD5 检查和上传编排 |
 | `MainActivity.kt` | DSM 凭据、图片目录、备份开关、备份文件夹和连接验证 |
+| `NasConfigurationScreen.kt` | DSM 配置页纯展示、输入控件和状态卡片 |
 | `SynologyApplication.kt` | 配置发布到 RemotePreferences |
 | `security/CredentialStore.java` | Android Keystore 加密凭据保存 |
 | `RemoteConfigStore.java` | 相册进程读取模块发布配置 |

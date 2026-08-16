@@ -1,5 +1,6 @@
 .gradle/
 .idea/
+/.kotlin/
 local.properties
 **/build/
 captures/
@@ -7,3 +8,5 @@ captures/
 /.agents/
 /AGENTS.md
 /dist/
+/keystore/
+/keystore.properties

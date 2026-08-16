@@ -8,9 +8,12 @@ import org.junit.Test;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
+/** 验证 DSM HTTPS 地址、反向代理路径与动态 API 路径边界 */
 public final class DsmUrlBuilderTest {
+    /** 验证 webapi 能在可选反向代理基础路径下正确拼接 */
     @Test
     public void buildsWebApiUrlBelowOptionalReverseProxyPath() {
+        // parameters 按预期 URL 顺序保存列表查询参数
         LinkedHashMap<String, String> parameters = new LinkedHashMap<>();
         parameters.put("api", "SYNO.FileStation.List");
         parameters.put("folder_path", "/photo/家庭 相册");
@@ -22,6 +25,7 @@ public final class DsmUrlBuilderTest {
         );
     }
 
+    /** 验证发现路径已有 webapi 前缀时不会重复追加目录段 */
     @Test
     public void acceptsWebApiPrefixedDiscoveryPathWithoutDuplicatingSegment() {
         assertEquals(
@@ -34,6 +38,7 @@ public final class DsmUrlBuilderTest {
         );
     }
 
+    /** 验证明文地址与尝试逃逸 webapi 的发现路径都被拒绝 */
     @Test
     public void rejectsCleartextAndEscapingApiPaths() {
         assertThrows(
@@ -50,4 +55,3 @@ public final class DsmUrlBuilderTest {
         );
     }
 }
-

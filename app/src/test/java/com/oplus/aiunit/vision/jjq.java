@@ -1,11 +1,17 @@
 package com.oplus.aiunit.vision;
 
 public final class jjq {
-    public final int photoCount;
-    public final int videoCount;
+    // 模拟 jjq.a 图库统计中的远端照片数量
+    public final int a;
+    // 模拟 jjq.b 图库统计中的远端视频数量
+    public final int b;
 
-    public jjq(int photoCount, int videoCount) {
-        this.photoCount = photoCount;
-        this.videoCount = videoCount;
+    // 按 ColorOS 当前双计数合同创建图库统计夹具
+    public jjq(
+            int photoCount, // 远端照片数量
+            int videoCount // 远端视频数量
+    ) {
+        this.a = photoCount;
+        this.b = videoCount;
     }
 }

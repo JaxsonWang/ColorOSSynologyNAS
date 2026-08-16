@@ -4,72 +4,80 @@ import android.util.Log;
 
 import com.jaxson.coloros.synologynas.SynologyConfig;
 
-import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.nio.charset.StandardCharsets;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
+/** DSM 浏览客户端，协调 API 发现、认证、媒体读取、缩略图和删除职责 */
 public final class DsmClient implements DsmGateway {
+    /** DSM 会话名保持与备份客户端一致，SID 本身不写入字段或持久化 */
     public static final String SESSION_NAME = "ColorOSSynologyNAS";
-    private static final int CONNECT_TIMEOUT_MS = 15_000;
-    private static final int READ_TIMEOUT_MS = 60_000;
-    private static final int LIST_LIMIT = 1_000;
-    private static final int DELETE_API_VERSION = 2;
-    private static final long DELETE_POLL_INTERVAL_MS = 250L;
-    private static final long DELETE_TASK_TIMEOUT_MS = 60_000L;
+    /** ColorOS 小缩略图对应的本地解码最大边长 */
     private static final int SMALL_THUMBNAIL_MAX_DIMENSION = 512;
+    /** ColorOS 大缩略图对应的本地解码最大边长 */
     private static final int LARGE_THUMBNAIL_MAX_DIMENSION = 1_280;
-    private static final String TAG = "ColorOSSynologyNAS";
-    private static final Set<String> IMAGE_EXTENSIONS = Set.of(
-            "jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "avif", "dng"
-    );
+    /** DSM 文件缩略图能力不足而必须本地解码的格式 */
     private static final Set<String> LOCAL_THUMBNAIL_EXTENSIONS = Set.of(
             "webp", "heic", "heif", "avif"
     );
+    /** Android 日志标签，用于定位本地缩略图处理结果 */
+    private static final String TAG = "ColorOSSynologyNAS";
 
+    /** 当前 DSM 地址、账号和远端根目录配置 */
     private final SynologyConfig config;
+    /** 远端图片目录遍历职责 */
+    private final DsmMediaListing mediaListing;
+    /** Delete v2 任务执行职责 */
+    private final DsmDeleteOperation deleteOperation;
 
+    /**
+     * 创建绑定当前配置的 DSM 浏览客户端
+     *
+     * @param config 当前已发布的 DSM 配置
+     */
     public DsmClient(SynologyConfig config) {
         this.config = config;
+        this.mediaListing = new DsmMediaListing(config);
+        this.deleteOperation = new DsmDeleteOperation(config);
     }
 
+    /**
+     * 完整验证登录、必需 API、设备型号和配置根目录，并始终注销测试会话
+     *
+     * @return DSM 返回的设备型号
+     * @throws IOException API 发现、认证、目录读取或注销失败
+     */
     public String testConnection() throws IOException {
+        // catalog 是本次连接测试动态发现的 API 目录
         DsmApiCatalog catalog = discoverApis();
+        // sid 仅存在于当前调用栈，并在 finally 中注销
         String sid = login(catalog);
+        // primaryFailure 用于在主体失败时保留注销异常而不覆盖根因
         Throwable primaryFailure = null;
         try {
             catalog.require("SYNO.FileStation.Download");
             catalog.require("SYNO.FileStation.Thumb");
-            requireDeleteApi(catalog);
+            DsmDeleteOperation.requireApi(catalog);
+            // deviceModel 是连接成功后发布给相册卡片的真实型号
             String deviceModel = getDeviceModel(catalog, sid);
-            DsmApiInfo listApi = catalog.require("SYNO.FileStation.List");
-            requestFolderPage(listApi, sid, config.remoteRoot(), 0, 1);
+            mediaListing.verifyFolder(catalog, sid, config.remoteRoot());
             return deviceModel;
-        } catch (IOException | RuntimeException | Error error) {
+        } catch (/* 主体失败必须原样继续抛出 */ IOException | RuntimeException | Error error) {
             primaryFailure = error;
             throw error;
         } finally {
             try {
                 logout(catalog, sid);
-            } catch (IOException logoutError) {
+            } catch (/* 注销失败不能覆盖已有主体失败 */ IOException logoutError) {
                 if (primaryFailure != null) {
                     primaryFailure.addSuppressed(logoutError);
                 } else {
@@ -79,9 +87,16 @@ public final class DsmClient implements DsmGateway {
         }
     }
 
+    /**
+     * 通过 SYNO.API.Info 动态发现浏览链路所需的 API 路径和版本
+     *
+     * @return DSM API 目录
+     * @throws IOException 请求或响应解析失败
+     */
     @Override
     public DsmApiCatalog discoverApis() throws IOException {
-        Map<String, String> parameters = parameters(
+        // parameters 明确列出浏览链路需要发现的全部 API
+        Map<String, String> parameters = DsmParameters.of(
                 "api", "SYNO.API.Info",
                 "version", "1",
                 "method", "query",
@@ -89,14 +104,26 @@ public final class DsmClient implements DsmGateway {
                         + "SYNO.FileStation.Download,SYNO.FileStation.Thumb,"
                         + "SYNO.FileStation.Delete,SYNO.Core.System"
         );
+        // url 指向 DSM 固定的 API 发现入口，后续业务路径均来自响应
         String url = DsmUrlBuilder.build(config.serverUrl(), "query.cgi", parameters);
-        return DsmApiInfoParser.parse(executeJson("GET", url, null).toString());
+        return DsmApiInfoParser.parse(
+                DsmHttpTransport.executeJson("GET", url, null).toString()
+        );
     }
 
+    /**
+     * 使用账号、密码和可选 OTP 登录 DSM，并返回仅供内存调用链使用的 SID
+     *
+     * @param catalog DSM 动态发现的 API 目录
+     * @return 非空 DSM SID
+     * @throws IOException 登录请求、业务错误或响应格式失败
+     */
     @Override
     public String login(DsmApiCatalog catalog) throws IOException {
+        // auth 是动态发现的认证 API 描述
         DsmApiInfo auth = catalog.require("SYNO.API.Auth");
-        Map<String, String> parameters = parameters(
+        // parameters 完整表达 DSM SID 登录合同
+        Map<String, String> parameters = DsmParameters.of(
                 "api", auth.name(),
                 "version", Integer.toString(auth.maxVersion()),
                 "method", "login",
@@ -108,42 +135,66 @@ public final class DsmClient implements DsmGateway {
         if (!config.otp().isEmpty()) {
             parameters.put("otp_code", config.otp());
         }
+        // url 使用发现的认证路径，表单参数不进入查询字符串
         String url = DsmUrlBuilder.build(config.serverUrl(), auth.path(), Map.of());
-        JSONObject response = executeJson(
+        // response 是 DSM 登录 JSON 响应
+        JSONObject response = DsmHttpTransport.executeJson(
                 "POST",
                 url,
                 DsmUrlBuilder.encodeParameters(parameters)
         );
-        requireSuccess(auth.name(), response);
+        DsmHttpTransport.requireSuccess(auth.name(), response);
         try {
+            // sid 是规范化前的 DSM 登录会话标识
             String sid = response.getJSONObject("data").getString("sid");
             if (sid.isBlank()) {
                 throw new DsmException("DSM 登录成功响应缺少 SID");
             }
             return sid;
-        } catch (JSONException error) {
+        } catch (/* 登录 data 或 sid 字段格式错误 */ JSONException error) {
             throw new DsmException("DSM 登录响应格式错误", error);
         }
     }
 
+    /**
+     * 读取 DSM 系统信息中的真实设备型号
+     *
+     * @param catalog DSM 动态发现的 API 目录
+     * @param sid 当前内存会话标识
+     * @return 非空 NAS 型号
+     * @throws IOException 请求、业务错误或响应格式失败
+     */
     @Override
     public String getDeviceModel(DsmApiCatalog catalog, String sid) throws IOException {
+        // systemApi 是动态发现的系统信息 API
         DsmApiInfo systemApi = catalog.require("SYNO.Core.System");
-        Map<String, String> parameters = parameters(
+        // parameters 表达系统信息查询合同
+        Map<String, String> parameters = DsmParameters.of(
                 "api", systemApi.name(),
                 "version", Integer.toString(systemApi.maxVersion()),
                 "method", "info",
                 "_sid", sid
         );
+        // url 使用发现路径与当前 SID 构建
         String url = DsmUrlBuilder.build(config.serverUrl(), systemApi.path(), parameters);
-        JSONObject response = executeJson("GET", url, null);
-        requireSuccess(systemApi.name(), response);
+        // response 是 DSM 系统信息响应
+        JSONObject response = DsmHttpTransport.executeJson("GET", url, null);
+        DsmHttpTransport.requireSuccess(systemApi.name(), response);
         return parseDeviceModel(response);
     }
 
+    /**
+     * 解析成功系统信息响应中的型号字段
+     *
+     * @param response DSM 系统信息响应
+     * @return 去除首尾空白后的设备型号
+     * @throws DsmException DSM 失败或型号缺失
+     */
     static String parseDeviceModel(JSONObject response) throws DsmException {
-        requireSuccess("SYNO.Core.System", response);
+        DsmHttpTransport.requireSuccess("SYNO.Core.System", response);
+        // data 是系统信息响应的数据对象
         JSONObject data = response.optJSONObject("data");
+        // model 是规范化后的 NAS 型号
         String model = data == null ? "" : data.optString("model", "").trim();
         if (model.isEmpty()) {
             throw new DsmException("SYNO.Core.System 响应缺少 NAS 型号");
@@ -151,42 +202,57 @@ public final class DsmClient implements DsmGateway {
         return model;
     }
 
+    /**
+     * 注销当前内存 SID，不在客户端字段或持久化层保留会话
+     *
+     * @param catalog DSM 动态发现的 API 目录
+     * @param sid 待注销的内存会话标识
+     * @throws IOException 注销请求或 DSM 业务失败
+     */
     public void logout(DsmApiCatalog catalog, String sid) throws IOException {
+        // auth 是动态发现的认证 API 描述
         DsmApiInfo auth = catalog.require("SYNO.API.Auth");
-        Map<String, String> parameters = parameters(
+        // parameters 完整表达指定会话的注销合同
+        Map<String, String> parameters = DsmParameters.of(
                 "api", auth.name(),
                 "version", Integer.toString(auth.maxVersion()),
                 "method", "logout",
                 "session", SESSION_NAME,
                 "_sid", sid
         );
+        // url 使用发现的认证路径，注销参数保留在表单体
         String url = DsmUrlBuilder.build(config.serverUrl(), auth.path(), Map.of());
-        JSONObject response = executeJson(
+        // response 是 DSM 注销响应
+        JSONObject response = DsmHttpTransport.executeJson(
                 "POST",
                 url,
                 DsmUrlBuilder.encodeParameters(parameters)
         );
-        requireSuccess(auth.name(), response);
+        DsmHttpTransport.requireSuccess(auth.name(), response);
     }
 
+    /**
+     * 遍历配置根目录并返回所有远端图片
+     *
+     * @param catalog DSM 动态发现的 API 目录
+     * @param sid 当前内存会话标识
+     * @return 远端图片元数据列表
+     * @throws IOException DSM 列表请求或解析失败
+     */
     @Override
     public List<RemoteMedia> listImages(DsmApiCatalog catalog, String sid) throws IOException {
-        DsmApiInfo listApi = catalog.require("SYNO.FileStation.List");
-        ArrayDeque<String> folders = new ArrayDeque<>();
-        Set<String> visited = new HashSet<>();
-        List<RemoteMedia> media = new ArrayList<>();
-        folders.add(config.remoteRoot());
-
-        while (!folders.isEmpty()) {
-            String folder = folders.removeFirst();
-            if (!visited.add(folder)) {
-                continue;
-            }
-            listFolder(listApi, sid, folder, folders, media);
-        }
-        return media;
+        return mediaListing.listImages(catalog, sid);
     }
 
+    /**
+     * 将远端原图按流直接写入调用方目标
+     *
+     * @param catalog DSM 动态发现的 API 目录
+     * @param sid 当前内存会话标识
+     * @param media 待读取的远端图片
+     * @param output ColorOS 调用链提供的目标输出流
+     * @throws IOException 下载请求或流复制失败
+     */
     @Override
     public void download(
             DsmApiCatalog catalog,
@@ -194,8 +260,10 @@ public final class DsmClient implements DsmGateway {
             RemoteMedia media,
             OutputStream output
     ) throws IOException {
+        // downloadApi 是动态发现的原图下载 API
         DsmApiInfo downloadApi = catalog.require("SYNO.FileStation.Download");
-        Map<String, String> parameters = parameters(
+        // parameters 完整表达 File Station 原图下载合同
+        Map<String, String> parameters = DsmParameters.of(
                 "api", downloadApi.name(),
                 "version", Integer.toString(downloadApi.maxVersion()),
                 "method", "download",
@@ -203,10 +271,21 @@ public final class DsmClient implements DsmGateway {
                 "mode", "download",
                 "_sid", sid
         );
+        // url 使用发现的下载路径与远端原始路径构建
         String url = DsmUrlBuilder.build(config.serverUrl(), downloadApi.path(), parameters);
-        streamFileResponse(downloadApi.name(), url, output);
+        DsmHttpTransport.streamFileResponse(downloadApi.name(), url, output);
     }
 
+    /**
+     * 按 ColorOS 尺寸策略返回 DSM 缩略图或特殊格式的本地 JPEG 缩略图
+     *
+     * @param catalog DSM 动态发现的 API 目录
+     * @param sid 当前内存会话标识
+     * @param media 待读取缩略图的远端图片
+     * @param size ColorOS 请求的 small 或 large 尺寸
+     * @param output ColorOS 调用链提供的目标输出流
+     * @throws IOException 远端读取或本地缩略图生成失败
+     */
     @Override
     public void downloadThumbnail(
             DsmApiCatalog catalog,
@@ -222,8 +301,10 @@ public final class DsmClient implements DsmGateway {
             generateLocalThumbnail(catalog, sid, media, size, output);
             return;
         }
+        // thumbnailApi 是动态发现的 File Station 缩略图 API
         DsmApiInfo thumbnailApi = catalog.require("SYNO.FileStation.Thumb");
-        Map<String, String> parameters = parameters(
+        // parameters 完整表达 DSM 缩略图读取合同
+        Map<String, String> parameters = DsmParameters.of(
                 "api", thumbnailApi.name(),
                 "version", Integer.toString(thumbnailApi.maxVersion()),
                 "method", "get",
@@ -231,20 +312,43 @@ public final class DsmClient implements DsmGateway {
                 "size", size,
                 "_sid", sid
         );
+        // url 使用发现的缩略图路径和原始远端路径构建
         String url = DsmUrlBuilder.build(config.serverUrl(), thumbnailApi.path(), parameters);
-        streamFileResponse(thumbnailApi.name(), url, output);
+        DsmHttpTransport.streamFileResponse(thumbnailApi.name(), url, output);
     }
 
+    /**
+     * 判断远端图片格式是否必须下载原文件后由 Android 本地解码
+     *
+     * @param media 待判断的远端图片
+     * @return 是否需要本地生成缩略图
+     */
     static boolean requiresLocalThumbnail(RemoteMedia media) {
         return LOCAL_THUMBNAIL_EXTENSIONS.contains(extensionOf(media.name()));
     }
 
+    /**
+     * 将 ColorOS 缩略图规格映射为本地解码最大边长
+     *
+     * @param size ColorOS 请求的 small 或 large 尺寸
+     * @return 本地解码最大边长
+     */
     static int localThumbnailMaxDimension(String size) {
         return "large".equals(size)
                 ? LARGE_THUMBNAIL_MAX_DIMENSION
                 : SMALL_THUMBNAIL_MAX_DIMENSION;
     }
 
+    /**
+     * 下载特殊格式原文件到临时文件并生成 JPEG 缩略图
+     *
+     * @param catalog DSM 动态发现的 API 目录
+     * @param sid 当前内存会话标识
+     * @param media 待处理的远端图片
+     * @param size ColorOS 请求的缩略图尺寸
+     * @param output ColorOS 调用链提供的目标输出流
+     * @throws IOException 下载或本地编码失败
+     */
     private void generateLocalThumbnail(
             DsmApiCatalog catalog,
             String sid,
@@ -252,24 +356,18 @@ public final class DsmClient implements DsmGateway {
             String size,
             OutputStream output
     ) throws IOException {
+        // extension 用于不暴露远端路径的诊断日志
         String extension = extensionOf(media.name());
+        // source 是仅在本次缩略图调用期间存在的临时源文件
         File source = File.createTempFile("synology-thumbnail-", ".source");
         try {
-            Log.i(
-                    TAG,
-                    "DSM generate local thumbnail: extension=" + extension + ", size=" + size
-            );
-            try (OutputStream fileOutput = new BufferedOutputStream(
-                    new FileOutputStream(source)
-            )) {
+            Log.i(TAG, "DSM generate local thumbnail: extension=" + extension + ", size=" + size);
+            // fileOutput 接收远端原图并在解码前关闭
+            try (OutputStream fileOutput = new BufferedOutputStream(new FileOutputStream(source))) {
                 download(catalog, sid, media, fileOutput);
             }
-            LocalThumbnailGenerator.generate(
-                    source,
-                    localThumbnailMaxDimension(size),
-                    output
-            );
-        } catch (IOException | RuntimeException error) {
+            LocalThumbnailGenerator.generate(source, localThumbnailMaxDimension(size), output);
+        } catch (/* 下载或本地解码失败必须原样继续抛出 */ IOException | RuntimeException error) {
             Log.e(
                     TAG,
                     "DSM local thumbnail failed: extension=" + extension
@@ -285,287 +383,51 @@ public final class DsmClient implements DsmGateway {
         }
     }
 
+    /**
+     * 删除指定远端图片并等待 DSM Delete v2 任务完成
+     *
+     * @param catalog DSM 动态发现的 API 目录
+     * @param sid 当前内存会话标识
+     * @param media 待删除的远端图片
+     * @throws IOException 删除请求或任务等待失败
+     */
     @Override
-    public void delete(
-            DsmApiCatalog catalog,
-            String sid,
-            List<RemoteMedia> media
-    ) throws IOException {
-        if (media.isEmpty()) {
-            throw new IllegalArgumentException("待删除的群晖照片为空");
-        }
-
-        DsmApiInfo deleteApi = requireDeleteApi(catalog);
-        JSONArray paths = new JSONArray();
-        for (RemoteMedia item : media) {
-            paths.put(item.remotePath());
-        }
-        Map<String, String> startParameters = parameters(
-                "api", deleteApi.name(),
-                "version", Integer.toString(DELETE_API_VERSION),
-                "method", "start",
-                "path", paths.toString(),
-                "accurate_progress", "true",
-                "recursive", "true",
-                "_sid", sid
-        );
-        String endpoint = DsmUrlBuilder.build(
-                config.serverUrl(),
-                deleteApi.path(),
-                Map.of()
-        );
-        JSONObject startResponse = executeJson(
-                "POST",
-                endpoint,
-                DsmUrlBuilder.encodeParameters(startParameters)
-        );
-        String taskId = parseDeleteTaskId(startResponse);
-
-        long deadlineNanos = System.nanoTime()
-                + DELETE_TASK_TIMEOUT_MS * 1_000_000L;
-        while (true) {
-            Map<String, String> statusParameters = parameters(
-                    "api", deleteApi.name(),
-                    "version", Integer.toString(DELETE_API_VERSION),
-                    "method", "status",
-                    "taskid", taskId,
-                    "_sid", sid
-            );
-            String statusUrl = DsmUrlBuilder.build(
-                    config.serverUrl(),
-                    deleteApi.path(),
-                    statusParameters
-            );
-            if (parseDeleteFinished(executeJson("GET", statusUrl, null))) {
-                return;
-            }
-            if (System.nanoTime() >= deadlineNanos) {
-                throw new DsmException("群晖删除任务等待超时");
-            }
-            try {
-                Thread.sleep(DELETE_POLL_INTERVAL_MS);
-            } catch (InterruptedException error) {
-                Thread.currentThread().interrupt();
-                throw new DsmException("群晖删除任务被中断", error);
-            }
-        }
-    }
-
-    static String parseDeleteTaskId(JSONObject response) throws DsmException {
-        requireSuccess("SYNO.FileStation.Delete", response);
-        JSONObject data = response.optJSONObject("data");
-        String taskId = data == null ? "" : data.optString("taskid", "").trim();
-        if (taskId.isEmpty()) {
-            throw new DsmException("SYNO.FileStation.Delete 启动响应缺少 taskid");
-        }
-        return taskId;
-    }
-
-    static boolean parseDeleteFinished(JSONObject response) throws DsmException {
-        requireSuccess("SYNO.FileStation.Delete", response);
-        JSONObject data = response.optJSONObject("data");
-        if (data == null || !data.has("finished")) {
-            throw new DsmException("SYNO.FileStation.Delete 状态响应缺少 finished");
-        }
-        return data.optBoolean("finished", false);
-    }
-
-    private static DsmApiInfo requireDeleteApi(DsmApiCatalog catalog) throws DsmException {
-        DsmApiInfo deleteApi = catalog.require("SYNO.FileStation.Delete");
-        if (deleteApi.minVersion() > DELETE_API_VERSION
-                || deleteApi.maxVersion() < DELETE_API_VERSION) {
-            throw new DsmException("DSM 未提供 SYNO.FileStation.Delete v2");
-        }
-        return deleteApi;
-    }
-
-    private void streamFileResponse(String apiName, String url, OutputStream output)
+    public void delete(DsmApiCatalog catalog, String sid, List<RemoteMedia> media)
             throws IOException {
-        HttpURLConnection connection = openConnection("GET", url);
-        try {
-            int status = connection.getResponseCode();
-            if (status < 200 || status >= 300) {
-                throw httpError(status, connection);
-            }
-            String contentType = connection.getContentType();
-            if (contentType != null && contentType.toLowerCase(Locale.ROOT).contains("json")) {
-                String body = readText(connection.getInputStream());
-                JSONObject response = parseJson(apiName, body);
-                requireSuccess(apiName, response);
-                throw new DsmException(apiName + " 未返回文件内容");
-            }
-            try (InputStream input = new BufferedInputStream(connection.getInputStream())) {
-                input.transferTo(output);
-            }
-        } finally {
-            connection.disconnect();
-        }
+        deleteOperation.delete(catalog, sid, media);
     }
 
-    private void listFolder(
-            DsmApiInfo listApi,
-            String sid,
-            String folder,
-            ArrayDeque<String> folders,
-            List<RemoteMedia> media
-    ) throws IOException {
-        int offset = 0;
-        while (true) {
-            try {
-                JSONObject data = requestFolderPage(
-                        listApi,
-                        sid,
-                        folder,
-                        offset,
-                        LIST_LIMIT
-                );
-                JSONArray files = data.getJSONArray("files");
-                for (int index = 0; index < files.length(); index++) {
-                    JSONObject file = files.getJSONObject(index);
-                    String path = file.getString("path");
-                    if (file.optBoolean("isdir", false)) {
-                        folders.addLast(path);
-                        continue;
-                    }
-                    String name = file.getString("name");
-                    String extension = extensionOf(name);
-                    if (!IMAGE_EXTENSIONS.contains(extension)) {
-                        continue;
-                    }
-                    JSONObject additional = file.optJSONObject("additional");
-                    long size = additional == null ? -1L : additional.optLong("size", -1L);
-                    JSONObject time = additional == null ? null : additional.optJSONObject("time");
-                    long modified = time == null ? 0L : time.optLong("mtime", 0L);
-                    media.add(new RemoteMedia(path, name, size, modified, mimeType(extension)));
-                }
-                offset += files.length();
-                int total = data.optInt("total", offset);
-                if (files.length() == 0 || offset >= total) {
-                    return;
-                }
-            } catch (JSONException error) {
-                throw new DsmException(listApi.name() + " 响应格式错误", error);
-            }
-        }
+    /**
+     * 保留测试可见入口并解析删除启动任务标识
+     *
+     * @param response DSM 删除启动响应
+     * @return 非空任务标识
+     * @throws DsmException DSM 返回失败或缺少任务标识
+     */
+    static String parseDeleteTaskId(JSONObject response) throws DsmException {
+        return DsmDeleteOperation.parseTaskId(response);
     }
 
-    private JSONObject requestFolderPage(
-            DsmApiInfo listApi,
-            String sid,
-            String folder,
-            int offset,
-            int limit
-    ) throws IOException {
-        Map<String, String> parameters = parameters(
-                "api", listApi.name(),
-                "version", Integer.toString(listApi.maxVersion()),
-                "method", "list",
-                "folder_path", folder,
-                "offset", Integer.toString(offset),
-                "limit", Integer.toString(limit),
-                "sort_by", "name",
-                "sort_direction", "asc",
-                "additional", "[\"size\",\"time\"]",
-                "_sid", sid
-        );
-        String url = DsmUrlBuilder.build(config.serverUrl(), listApi.path(), parameters);
-        JSONObject response = executeJson("GET", url, null);
-        if (!response.optBoolean("success", false)) {
-            throw DsmException.fromFileStationListResponse(folder, response);
-        }
-        try {
-            return response.getJSONObject("data");
-        } catch (JSONException error) {
-            throw new DsmException(listApi.name() + " 响应格式错误", error);
-        }
+    /**
+     * 保留测试可见入口并解析删除任务完成标志
+     *
+     * @param response DSM 删除状态响应
+     * @return 删除任务是否完成
+     * @throws DsmException DSM 返回失败或缺少完成标志
+     */
+    static boolean parseDeleteFinished(JSONObject response) throws DsmException {
+        return DsmDeleteOperation.parseFinished(response);
     }
 
-    private JSONObject executeJson(String method, String url, String formBody) throws IOException {
-        HttpURLConnection connection = openConnection(method, url);
-        try {
-            if (formBody != null) {
-                byte[] body = formBody.getBytes(StandardCharsets.UTF_8);
-                connection.setDoOutput(true);
-                connection.setRequestProperty(
-                        "Content-Type",
-                        "application/x-www-form-urlencoded; charset=UTF-8"
-                );
-                connection.setFixedLengthStreamingMode(body.length);
-                try (OutputStream output = new BufferedOutputStream(connection.getOutputStream())) {
-                    output.write(body);
-                }
-            }
-            int status = connection.getResponseCode();
-            if (status < 200 || status >= 300) {
-                throw httpError(status, connection);
-            }
-            return parseJson("DSM", readText(connection.getInputStream()));
-        } finally {
-            connection.disconnect();
-        }
-    }
-
-    private HttpURLConnection openConnection(String method, String url) throws IOException {
-        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
-        connection.setRequestMethod(method);
-        connection.setConnectTimeout(CONNECT_TIMEOUT_MS);
-        connection.setReadTimeout(READ_TIMEOUT_MS);
-        connection.setInstanceFollowRedirects(false);
-        connection.setRequestProperty("Accept", "application/json");
-        return connection;
-    }
-
-    private DsmException httpError(int status, HttpURLConnection connection) throws IOException {
-        InputStream errorStream = connection.getErrorStream();
-        String body = errorStream == null ? "" : readText(errorStream);
-        return new DsmException("DSM HTTP 请求失败: " + status + (body.isBlank() ? "" : ", " + body));
-    }
-
-    private static JSONObject parseJson(String apiName, String body) throws DsmException {
-        try {
-            return new JSONObject(body);
-        } catch (JSONException error) {
-            throw new DsmException(apiName + " 未返回有效 JSON", error);
-        }
-    }
-
-    private static void requireSuccess(String apiName, JSONObject response) throws DsmException {
-        if (!response.optBoolean("success", false)) {
-            throw DsmException.fromApiResponse(apiName, response);
-        }
-    }
-
-    private static String readText(InputStream input) throws IOException {
-        try (InputStream closeable = input) {
-            return new String(closeable.readAllBytes(), StandardCharsets.UTF_8);
-        }
-    }
-
-    private static LinkedHashMap<String, String> parameters(String... pairs) {
-        LinkedHashMap<String, String> parameters = new LinkedHashMap<>();
-        for (int index = 0; index < pairs.length; index += 2) {
-            parameters.put(pairs[index], pairs[index + 1]);
-        }
-        return parameters;
-    }
-
+    /**
+     * 提取小写扩展名供缩略图格式策略使用
+     *
+     * @param name 远端文件名
+     * @return 不含点号的小写扩展名；无扩展名时为空字符串
+     */
     private static String extensionOf(String name) {
+        // dot 是文件名最后一个扩展名分隔符位置
         int dot = name.lastIndexOf('.');
         return dot < 0 ? "" : name.substring(dot + 1).toLowerCase(Locale.ROOT);
-    }
-
-    private static String mimeType(String extension) {
-        return switch (extension) {
-            case "jpg", "jpeg" -> "image/jpeg";
-            case "png" -> "image/png";
-            case "gif" -> "image/gif";
-            case "webp" -> "image/webp";
-            case "heic" -> "image/heic";
-            case "heif" -> "image/heif";
-            case "bmp" -> "image/bmp";
-            case "avif" -> "image/avif";
-            case "dng" -> "image/x-adobe-dng";
-            default -> "application/octet-stream";
-        };
     }
 }

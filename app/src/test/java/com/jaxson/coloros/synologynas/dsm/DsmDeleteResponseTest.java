@@ -8,9 +8,12 @@ import static org.junit.Assert.assertTrue;
 import org.json.JSONObject;
 import org.junit.Test;
 
+/** 验证 File Station Delete v2 启动与状态响应边界 */
 public final class DsmDeleteResponseTest {
+    /** 验证删除启动响应能够提取非空任务标识 */
     @Test
     public void parsesDeleteTaskId() throws Exception {
+        // response 是包含任务标识的最小成功样本
         JSONObject response = new JSONObject("""
                 {"success":true,"data":{"taskid":"FileStation_Delete_fixture"}}
                 """);
@@ -21,6 +24,7 @@ public final class DsmDeleteResponseTest {
         );
     }
 
+    /** 验证删除任务进行中与完成状态均保持原布尔语义 */
     @Test
     public void parsesDeleteTaskProgress() throws Exception {
         assertFalse(DsmClient.parseDeleteFinished(new JSONObject("""
@@ -31,8 +35,10 @@ public final class DsmDeleteResponseTest {
                 """)));
     }
 
+    /** 验证删除错误码、缺少任务标识和缺少完成字段都明确失败 */
     @Test
     public void rejectsDeleteErrorAndMalformedResponses() throws Exception {
+        // apiError 是 DSM 删除业务失败映射出的明确异常
         DsmException apiError = assertThrows(
                 DsmException.class,
                 () -> DsmClient.parseDeleteTaskId(new JSONObject("""
