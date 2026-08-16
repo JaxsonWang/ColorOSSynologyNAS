@@ -1,0 +1,160 @@
+name: Release APK
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing tag to build and publish; leave empty for an artifact-only build
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build signed release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+      RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+      RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+      REQUESTED_RELEASE_TAG: ${{ inputs.release_tag }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v5
+        with:
+          validate-wrappers: true
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install Android SDK packages
+        run: sdkmanager --channel=3 "platforms;android-37.0" "build-tools;37.0.0"
+
+      - name: Prepare release signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 校验发布签名所需的四个 Actions Secrets
+          for secret_name in \
+            RELEASE_KEYSTORE_BASE64 \
+            RELEASE_STORE_PASSWORD \
+            RELEASE_KEY_ALIAS \
+            RELEASE_KEY_PASSWORD; do
+            if [[ -z "${!secret_name:-}" ]]; then
+              echo "Missing required Actions secret: ${secret_name}" >&2
+              exit 1
+            fi
+          done
+
+          # 保存解码后的 PKCS12 密钥库
+          keystore_path="${RUNNER_TEMP}/release.p12"
+          printf '%s' "${RELEASE_KEYSTORE_BASE64}" | base64 --decode > "${keystore_path}"
+          chmod 600 "${keystore_path}"
+          echo "RELEASE_STORE_FILE=${keystore_path}" >> "${GITHUB_ENV}"
+
+      - name: Test, lint, and build release
+        run: ./gradlew --no-daemon testDebugUnitTest lintDebug assembleRelease --warning-mode all
+
+      - name: Verify and package APK
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          # 定位 AGP 生成的发布元数据
+          metadata="app/build/outputs/apk/release/output-metadata.json"
+          # 记录发布 APK 所在目录
+          apk_directory="app/build/outputs/apk/release"
+          # 从发布元数据读取版本名称
+          version_name="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["elements"][0]["versionName"])' "${metadata}")"
+          # 从发布元数据读取版本号
+          version_code="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["elements"][0]["versionCode"])' "${metadata}")"
+          # 从发布元数据读取 APK 文件名
+          output_file="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["elements"][0]["outputFile"])' "${metadata}")"
+          # 组合待验证的发布 APK 路径
+          apk="${apk_directory}/${output_file}"
+          # 根据 Gradle 版本名称生成唯一合法标签
+          expected_tag="v${version_name}"
+          # 初始化当前工作流对应的发布标签
+          release_tag=""
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            # 使用标签触发事件中的标签
+            release_tag="${GITHUB_REF_NAME}"
+          elif [[ -n "${REQUESTED_RELEASE_TAG}" ]]; then
+            # 使用手动触发时指定的标签
+            release_tag="${REQUESTED_RELEASE_TAG}"
+          fi
+
+          if [[ -n "${release_tag}" && "${release_tag}" != "${expected_tag}" ]]; then
+            echo "Tag ${release_tag} does not match Gradle version ${expected_tag}" >&2
+            exit 1
+          fi
+
+          "${ANDROID_HOME}/build-tools/37.0.0/apksigner" verify \
+            --verbose \
+            --print-certs \
+            "${apk}"
+
+          # 生成对外分发的 APK 文件名
+          asset_name="ColorOSSynologyNAS-${expected_tag}.apk"
+          mkdir -p dist
+          cp "${apk}" "dist/${asset_name}"
+
+          {
+            echo "version_name=${version_name}"
+            echo "version_code=${version_code}"
+            echo "release_tag=${release_tag}"
+            echo "apk_path=dist/${asset_name}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: ColorOSSynologyNAS-${{ steps.package.outputs.version_name }}
+          path: ${{ steps.package.outputs.apk_path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish GitHub Release
+        if: github.ref_type == 'tag' || inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.package.outputs.release_tag }}
+          APK_PATH: ${{ steps.package.outputs.apk_path }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" \
+              "${APK_PATH}" \
+              --clobber
+          else
+            gh release create "${RELEASE_TAG}" \
+              "${APK_PATH}" \
+              --verify-tag \
+              --generate-notes \
+              --title "ColorOSSynologyNAS ${RELEASE_TAG}"
+          fi
