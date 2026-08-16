@@ -164,9 +164,71 @@ final class DsmHttpTransport {
      * @throws DsmException DSM 明确返回失败
      */
     static void requireSuccess(String apiName, JSONObject response) throws DsmException {
-        if (!response.optBoolean("success", false)) {
+        if (!readSuccess(apiName, response)) {
             throw DsmException.fromApiResponse(apiName, response);
         }
+    }
+
+    /**
+     * 严格读取 DSM 响应的成功标志
+     *
+     * @param apiName 当前 DSM API 名称
+     * @param response DSM JSON 响应
+     * @return DSM 明确返回的成功标志
+     * @throws DsmException success 缺失或实际类型不是布尔值
+     */
+    static boolean readSuccess(String apiName, JSONObject response) throws DsmException {
+        // success 是尚未转换的协议字段值
+        Object success = response.opt("success");
+        if (!(success instanceof Boolean)) {
+            throw new DsmException(apiName + " 响应 success 类型错误");
+        }
+        return (Boolean) success;
+    }
+
+    /**
+     * 严格解析认证成功响应中的会话标识
+     *
+     * @param response DSM 认证成功响应
+     * @return 规范化后的非空 SID
+     * @throws DsmException data 或 sid 缺失、类型错误或值为空
+     */
+    static String parseSid(JSONObject response) throws DsmException {
+        try {
+            // data 是严格读取的认证响应数据对象
+            JSONObject data = response.getJSONObject("data");
+            if (!data.has("sid")) {
+                throw new DsmException("DSM 登录成功响应缺少 SID");
+            }
+            // sid 是严格读取并规范化后的内存会话标识
+            String sid = requiredString(data, "sid").trim();
+            if (sid.isEmpty()) {
+                throw new DsmException("DSM 登录成功响应缺少 SID");
+            }
+            return sid;
+        } catch (/* 登录 data 或 sid 字段格式错误 */ JSONException error) {
+            throw new DsmException("DSM 登录响应格式错误", error);
+        }
+    }
+
+    /**
+     * 严格读取 DSM JSON 字符串字段，禁止 Android JSONObject 执行隐式类型转换
+     *
+     * @param object 当前 DSM 协议对象
+     * @param field 必须保存为原生字符串的字段名
+     * @return DSM 响应中直接保存的字符串
+     * @throws JSONException 字段缺失或实际类型不是字符串
+     */
+    static String requiredString(
+            JSONObject object, // 当前 DSM 协议对象
+            String field // 必须保存为原生字符串的字段名
+    ) throws JSONException {
+        // value 是未经 Android JSONObject 字符串转换的原始字段值
+        Object value = object.get(field);
+        if (!(value instanceof String)) {
+            throw new JSONException(field + " 不是字符串");
+        }
+        return (String) value;
     }
 
     /**

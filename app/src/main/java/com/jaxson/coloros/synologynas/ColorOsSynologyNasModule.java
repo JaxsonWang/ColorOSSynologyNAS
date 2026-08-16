@@ -14,6 +14,7 @@ import com.jaxson.coloros.synologynas.gallery.GalleryBackupClient;
 import com.jaxson.coloros.synologynas.gallery.GalleryRemoteClient;
 import com.jaxson.coloros.synologynas.gallery.RemoteGalleryRepository;
 
+import java.io.IOException;
 import java.lang.reflect.Method;
 
 import io.github.libxposed.api.XposedModule;
@@ -41,7 +42,9 @@ public final class ColorOsSynologyNasModule extends XposedModule {
      * @param param libxposed 提供的模块加载参数，包含当前进程名
      */
     @Override
-    public void onModuleLoaded(ModuleLoadedParam param) {
+    public void onModuleLoaded(
+            ModuleLoadedParam param /* 提供当前模块实例所在进程名的加载参数 */
+    ) {
         processName = param.getProcessName();
     }
 
@@ -51,7 +54,9 @@ public final class ColorOsSynologyNasModule extends XposedModule {
      * @param param libxposed 提供的包就绪参数，包含包名、类加载器和首包标记
      */
     @Override
-    public synchronized void onPackageReady(PackageReadyParam param) {
+    public synchronized void onPackageReady(
+            PackageReadyParam param /* 提供当前包、类加载器和首包状态的就绪参数 */
+    ) {
         if (attachHookInstalled
                 || !param.isFirstPackage()
                 || !HookPolicy.TARGET_PACKAGE.equals(param.getPackageName())
@@ -64,7 +69,7 @@ public final class ColorOsSynologyNasModule extends XposedModule {
             attachHookInstalled = true;
         } catch (ReflectiveOperationException /* Application.attach 解析异常 */ error) {
             log(Log.ERROR, TAG, "Application.attach resolution failed", error);
-        } catch (HookFailedError | RuntimeException /* 启动 Hook 安装异常 */ error) {
+        } catch (HookFailedError /* 启动 Hook 安装异常 */ error) {
             log(Log.ERROR, TAG, "Application.attach hook failed", error);
         }
     }
@@ -76,7 +81,9 @@ public final class ColorOsSynologyNasModule extends XposedModule {
      * @throws ReflectiveOperationException Application.attach 无法按固定签名解析时抛出
      */
     @SuppressLint("DiscouragedPrivateApi")
-    private void hookApplicationAttach(ClassLoader classLoader)
+    private void hookApplicationAttach(
+            ClassLoader classLoader /* 解析 Application.attach 的相册类加载器 */
+    )
             throws ReflectiveOperationException {
         // 对应 Android Application.attach(Context) 的唯一启动目标
         Method attach = Application.class.getDeclaredMethod("attach", Context.class);
@@ -150,15 +157,19 @@ public final class ColorOsSynologyNasModule extends XposedModule {
             hookInstaller.installGalleryHomeHook();
             hookInstaller.installEntryHook();
             hookInstaller.installSyntheticDevicePresenceHook();
-            hookInstaller.installLabelHook();
             hookInstaller.installGalleryCardHooks();
             targetHooksInstalled = true;
             logInfo("remote DSM configuration available: " + remoteClient.isConfigured());
             logInfo("hooks installed for gallery version " + HookPolicy.TARGET_VERSION_CODE);
         } catch (ReflectiveOperationException /* 私有目标整组解析异常 */ error) {
             log(Log.ERROR, TAG, "hook target resolution failed", error);
-        } catch (HookFailedError | RuntimeException /* 目标 Hook 安装异常 */ error) {
+        } catch (IOException /* 已发布 DSM 配置读取异常 */ error) {
+            log(Log.ERROR, TAG, "hook dependency initialization failed", error);
+        } catch (HookFailedError /* 目标 Hook 安装异常 */ error) {
             log(Log.ERROR, TAG, "hook installation failed", error);
+        } catch (IllegalArgumentException | IllegalStateException
+                 /* 已发布配置或 Hook 依赖状态无效 */ error) {
+            log(Log.ERROR, TAG, "hook dependency initialization failed", error);
         }
     }
 

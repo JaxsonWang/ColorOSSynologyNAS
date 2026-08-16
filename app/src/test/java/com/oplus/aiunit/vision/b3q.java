@@ -2,6 +2,7 @@ package com.oplus.aiunit.vision;
 
 import com.oplus.gallery.business_lib.nas.NasProvider;
 
+// 模拟 ColorOS 单个 NAS 相册的数据合同
 public final class b3q {
     // 模拟 NAS 相册 DTO 的 Provider 归属字段
     public final NasProvider provider;

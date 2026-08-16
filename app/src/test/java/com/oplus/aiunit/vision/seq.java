@@ -2,6 +2,7 @@ package com.oplus.aiunit.vision;
 
 import java.util.List;
 
+// 模拟 ColorOS 单张照片备份上传请求的数据合同
 public final class seq {
     // 模拟 seq.a 目标 NAS 设备标识字段
     public final String a;

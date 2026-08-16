@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
 
+// 维护与群晖配置严格绑定的图库清单快照和 DSM 浏览会话
 public final class RemoteGalleryRepository implements RemoteGalleryDataSource {
     // 限制远端清单快照在相册进程内最多复用一分钟
     private static final long INVENTORY_TTL_MILLIS = 60_000L;
@@ -234,8 +235,16 @@ public final class RemoteGalleryRepository implements RemoteGalleryDataSource {
             SynologyConfig config, // 当前相册进程可见的完整群晖配置
             String fingerprint // 与该配置严格对应的内存指纹
     ) throws IOException {
-        if (session != null && session.configFingerprint.equals(fingerprint)) {
-            return session;
+        if (session != null) {
+            if (session.configFingerprint.equals(fingerprint)) {
+                return session;
+            }
+            // 观察到配置不匹配时立即失效旧会话和清单
+            Session previousSession = session;
+            session = null;
+            snapshot = null;
+            // 本次显式请求尝试一次旧 SID 注销，失败不保留本地补偿状态
+            previousSession.client.logout(previousSession.catalog, previousSession.sid);
         }
         // 按当前配置创建的 DSM 网关
         DsmGateway client = clientFactory.apply(config);
@@ -258,6 +267,9 @@ public final class RemoteGalleryRepository implements RemoteGalleryDataSource {
             return config;
         } catch (DsmException error /* 已具备明确业务语义的 DSM 异常 */) {
             throw error;
+        } catch (IllegalArgumentException | IllegalStateException
+                 /* 已保存配置的值或完整性无效 */ error) {
+            throw new DsmException(error.getMessage(), error);
         } catch (GeneralSecurityException error /* 远端凭据解密异常 */) {
             throw new DsmException("群晖凭据读取失败", error);
         }
@@ -295,6 +307,7 @@ public final class RemoteGalleryRepository implements RemoteGalleryDataSource {
         return List.copyOf(items.subList(offset, Math.min(offset + limit, items.size())));
     }
 
+    // 保存一次完整且与配置指纹绑定的不可变图库快照
     static final class Snapshot {
         // 绑定该快照与生成配置的内存指纹
         final String configFingerprint;
@@ -327,6 +340,7 @@ public final class RemoteGalleryRepository implements RemoteGalleryDataSource {
         }
     }
 
+    // 保存与单一配置指纹绑定的 DSM 已认证浏览会话
     private static final class Session {
         // 绑定会话与创建配置的内存指纹
         private final String configFingerprint;

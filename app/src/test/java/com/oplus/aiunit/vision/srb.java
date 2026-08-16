@@ -2,6 +2,7 @@ package com.oplus.aiunit.vision;
 
 import com.oplus.gallery.business_lib.nas.NasDeviceAvailability;
 
+// 模拟 ColorOS NAS 设备可用状态的数据合同
 public final class srb {
     // 模拟 srb 的目标设备唯一标识字段
     public final String f24797a;

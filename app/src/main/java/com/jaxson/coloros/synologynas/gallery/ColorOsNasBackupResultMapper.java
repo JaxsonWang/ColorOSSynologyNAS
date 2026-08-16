@@ -10,6 +10,7 @@ import java.util.Set;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+// 将群晖备份领域结果映射为 ColorOS 私有结果 DTO
 final class ColorOsNasBackupResultMapper {
     // 定位 ColorOS 备份 hash 查询结果的密封层次
     private static final String BACKUP_HASH_RESULT = "com.oplus.aiunit.vision.yjq";
@@ -56,8 +57,6 @@ final class ColorOsNasBackupResultMapper {
             Constructor<?> constructor = type.getDeclaredConstructor(Set.class);
             constructor.setAccessible(true);
             return constructor.newInstance(existing);
-        } catch (ReflectiveOperationException error /* 私有 DTO 解析或构造异常 */) {
-            throw error;
         } catch (IOException error /* 群晖备份 hash 查询异常 */) {
             LOGGER.log(Level.WARNING, "DSM backup hash query failed", error);
             // ColorOS hash 查询失败结果的运行时类型
@@ -69,7 +68,7 @@ final class ColorOsNasBackupResultMapper {
             // 失败结果接收错误码和可观察消息的构造器
             Constructor<?> constructor = type.getDeclaredConstructor(int.class, String.class);
             constructor.setAccessible(true);
-            return constructor.newInstance(-1, ColorOsNasReflection.errorMessage(error));
+            return constructor.newInstance(-1, error.getMessage());
         }
     }
 

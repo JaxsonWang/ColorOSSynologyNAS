@@ -2,6 +2,7 @@ package com.jaxson.coloros.synologynas.dsm;
 
 import com.jaxson.coloros.synologynas.backup.BackupPath;
 
+import org.json.JSONObject;
 import org.junit.Test;
 
 import java.nio.charset.StandardCharsets;
@@ -76,6 +77,65 @@ public final class DsmBackupClientTest {
         ));
 
         assertTrue(encoded.contains("taskid=%2251CBD95028B22AED%22"));
+    }
+
+    /** 验证 MD5 任务进行中与完成状态只接受布尔值 */
+    @Test
+    public void parsesStrictMd5FinishedBoolean() throws Exception {
+        assertFalse(DsmBackupClient.parseMd5Finished(
+                "SYNO.FileStation.MD5",
+                new JSONObject("{\"finished\":false}")
+        ));
+        assertTrue(DsmBackupClient.parseMd5Finished(
+                "SYNO.FileStation.MD5",
+                new JSONObject("{\"finished\":true}")
+        ));
+    }
+
+    /** 验证 MD5 完成标志的字符串、数字、空值和缺失都立即失败 */
+    @Test
+    public void rejectsMalformedMd5FinishedValues() {
+        // malformedData 保存 finished 类型错误和字段缺失的状态对象
+        String[] malformedData = {
+                "{\"finished\":\"true\"}",
+                "{\"finished\":1}",
+                "{\"finished\":null}",
+                "{}"
+        };
+
+        for (/* 当前待拒绝的 MD5 状态对象 */ String json : malformedData) {
+            assertThrows(
+                    DsmException.class,
+                    () -> DsmBackupClient.parseMd5Finished(
+                            "SYNO.FileStation.MD5",
+                            new JSONObject(json)
+                    )
+            );
+        }
+    }
+
+    /** 验证 MD5 任务标识和摘要不会把非字符串 JSON 值隐式转成文本 */
+    @Test
+    public void rejectsNonStringMd5TaskIdAndHash() throws Exception {
+        // taskIdError 是数字任务标识触发的严格类型错误
+        DsmException taskIdError = assertThrows(
+                DsmException.class,
+                () -> DsmBackupClient.parseTaskId(
+                        "SYNO.FileStation.MD5",
+                        new JSONObject("{\"data\":{\"taskid\":51}}")
+                )
+        );
+        // hashError 是数字摘要触发的严格类型错误
+        DsmException hashError = assertThrows(
+                DsmException.class,
+                () -> DsmBackupClient.parseMd5Hash(
+                        "SYNO.FileStation.MD5",
+                        new JSONObject("{\"md5\":1234}")
+                )
+        );
+
+        assertEquals("SYNO.FileStation.MD5 启动响应 taskid 类型错误", taskIdError.getMessage());
+        assertEquals("SYNO.FileStation.MD5 状态响应 MD5 类型错误", hashError.getMessage());
     }
 
     /** 验证只有 DSM 明确返回 success JSON 才确认上传字节数 */

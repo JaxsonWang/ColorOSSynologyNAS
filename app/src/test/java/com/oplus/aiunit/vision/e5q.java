@@ -1,5 +1,6 @@
 package com.oplus.aiunit.vision;
 
+// 模拟 ColorOS 首页 NAS 设备分组的数据合同
 public final class e5q extends oe2<ogq> {
     // 模拟首页 NAS 分组中的设备数量字段
     public final int c;

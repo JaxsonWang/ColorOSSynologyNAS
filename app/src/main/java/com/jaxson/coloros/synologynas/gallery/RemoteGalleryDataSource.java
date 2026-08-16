@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.List;
 
+// 定义群晖图库浏览、媒体读取和删除数据源边界
 public interface RemoteGalleryDataSource {
     // 返回相册进程当前是否已经取得完整群晖配置
     boolean isConfigured();

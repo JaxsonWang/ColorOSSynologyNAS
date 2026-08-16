@@ -2,6 +2,7 @@ package com.jaxson.coloros.synologynas;
 
 import android.content.SharedPreferences;
 
+/** 使用 libxposed RemotePreferences 发布并读取相册进程群晖配置 */
 public final class RemoteConfigStore implements SynologyConfigSource {
     // 指定宿主进程与相册进程共享配置时使用的 RemotePreferences 分组
     public static final String GROUP = "synology_dsm";
@@ -17,7 +18,9 @@ public final class RemoteConfigStore implements SynologyConfigSource {
      *
      * @param preferences 由宿主发布并供相册进程读取的偏好存储
      */
-    public RemoteConfigStore(SharedPreferences preferences) {
+    public RemoteConfigStore(
+            SharedPreferences preferences // 由宿主发布并供相册进程读取的偏好存储
+    ) {
         this.preferences = preferences;
     }
 
@@ -26,7 +29,9 @@ public final class RemoteConfigStore implements SynologyConfigSource {
      *
      * @param config 已校验且需要发布到相册进程的群晖配置
      */
-    public void save(SynologyConfig config) {
+    public void save(
+            SynologyConfig config // 已校验且需要发布到相册进程的群晖配置
+    ) {
         // 记录同步提交结果，避免把未发布成功的配置误报为可用
         boolean committed = preferences.edit()
                 .putString(KEY_CONFIG, RemoteConfigCodec.encode(config))
@@ -36,12 +41,10 @@ public final class RemoteConfigStore implements SynologyConfigSource {
         }
     }
 
-    /** 判断 RemotePreferences 中是否存在非空的完整配置 */
+    /** 判断 RemotePreferences 中是否存在完整配置键 */
     @Override
     public boolean hasConfig() {
-        // 读取唯一配置键，空文本不视为可用配置
-        String encoded = preferences.getString(KEY_CONFIG, null);
-        return encoded != null && !encoded.isBlank();
+        return preferences.contains(KEY_CONFIG);
     }
 
     /**
@@ -51,11 +54,11 @@ public final class RemoteConfigStore implements SynologyConfigSource {
      */
     @Override
     public SynologyConfig load() {
-        // 读取唯一配置键，保持与 hasConfig 相同的存在性判断
-        String encoded = preferences.getString(KEY_CONFIG, null);
-        if (encoded == null || encoded.isBlank()) {
+        if (!preferences.contains(KEY_CONFIG)) {
             return null;
         }
+        // 读取已经存在的唯一配置值，使空白或损坏内容进入严格解码边界
+        String encoded = preferences.getString(KEY_CONFIG, null);
         return RemoteConfigCodec.decode(encoded);
     }
 }

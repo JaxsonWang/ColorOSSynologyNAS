@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.Set;
 
+// 定义 ColorOS Provider 可调用的群晖备份业务边界
 public interface GalleryBackupService {
     // 返回用户是否开启 ColorOS 原生 NAS 备份入口
     boolean isEnabled();

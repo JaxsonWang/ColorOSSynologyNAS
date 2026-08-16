@@ -1,5 +1,6 @@
 package com.jaxson.coloros.synologynas.backup;
 
+/** 表达 DSM 上传接口使用的不可变目标文件夹和文件名 */
 public final class BackupPath {
     // 保存 DSM 上传接口接收的目标文件夹绝对路径
     private final String folder;

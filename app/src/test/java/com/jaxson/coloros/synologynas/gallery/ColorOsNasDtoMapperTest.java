@@ -11,6 +11,7 @@ import java.util.List;
 
 import static org.junit.Assert.assertEquals;
 
+// 验证群晖相册和照片模型到 ColorOS 私有 DTO 的精确映射
 public final class ColorOsNasDtoMapperTest {
     @Test
     // 验证内部相册模型按当前十参数合同完整映射为 b3q
@@ -74,7 +75,7 @@ public final class ColorOsNasDtoMapperTest {
         assertEquals("IMG_1.jpg", result.name);
         assertEquals(1024L, result.size);
         assertEquals("image/jpeg", result.mimeType);
-        assertEquals(123_000L, result.modifiedAtMillis);
+        assertEquals(Long.valueOf(123_000L), result.modifiedAtMillis);
         assertEquals(NasPhotoInfo.MediaType.IMAGE, result.mediaType);
         assertEquals(NasPhotoInfo.LivePhotoType.NONE, result.livePhotoType);
     }

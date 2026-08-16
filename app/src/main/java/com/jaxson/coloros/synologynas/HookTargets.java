@@ -10,8 +10,6 @@ import java.lang.reflect.Method;
  * @param readBoolean 按字符串读取能力开关的方法
  * @param readBooleanDefault 按资源标识读取能力开关的方法
  * @param openNasDeviceSpace 打开 NAS 页面或设备管理入口的方法
- * @param resolveFolderNote 生成 NAS 文件夹文案的方法
- * @param resolveNasStateMessage 生成 NAS 状态说明的方法
  * @param cloudSyncProxyConstructor CloudSyncProxyDM 的无参构造器
  * @param listNasDevices 读取相册 NAS 设备列表的方法
  * @param readGalleryStats 读取指定 NAS 设备本地统计的方法
@@ -39,8 +37,6 @@ record HookTargets(
         /* 按字符串读取能力开关的目标 */ Method readBoolean,
         /* 按资源标识读取能力开关的目标 */ Method readBooleanDefault,
         /* 打开 NAS 页面或设备管理入口的目标 */ Method openNasDeviceSpace,
-        /* 生成 NAS 文件夹文案的目标 */ Method resolveFolderNote,
-        /* 生成 NAS 状态说明的目标 */ Method resolveNasStateMessage,
         /* CloudSyncProxyDM 的无参构造目标 */ Constructor<?> cloudSyncProxyConstructor,
         /* 读取相册 NAS 设备列表的目标 */ Method listNasDevices,
         /* 读取指定 NAS 设备本地统计的目标 */ Method readGalleryStats,

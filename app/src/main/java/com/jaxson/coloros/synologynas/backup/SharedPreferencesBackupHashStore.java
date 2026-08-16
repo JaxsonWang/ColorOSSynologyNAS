@@ -13,6 +13,7 @@ import java.util.LinkedHashSet;
 import java.util.Locale;
 import java.util.Set;
 
+/** 按群晖目标配置作用域持久化已确认备份的 ColorOS 原生哈希 */
 public final class SharedPreferencesBackupHashStore implements BackupHashStore {
     // 指定相册进程内持久化备份哈希索引的 SharedPreferences 文件
     public static final String PREFERENCES_NAME = "coloros_synology_backup_hashes";
@@ -40,15 +41,15 @@ public final class SharedPreferencesBackupHashStore implements BackupHashStore {
      */
     @Override
     public synchronized Set<String> findExisting(
-            SynologyConfig config,
-            Collection<String> hashes
+            SynologyConfig config, // 决定哈希索引作用域的群晖配置
+            Collection<String> hashes // 待查询的 ColorOS 原生哈希集合
     ) {
         // 读取当前配置作用域已持久化的全部原生哈希
         Set<String> uploaded = preferences.getStringSet(scopeKey(config), Set.of());
         // 收集输入集合与已上传集合的有序交集
         Set<String> existing = new LinkedHashSet<>();
         // 逐一检查调用方请求查询的 ColorOS 原生哈希
-        for (String hash : hashes) {
+        for (String /* 当前查询的 ColorOS 原生哈希 */ hash : hashes) {
             // 保存去除首尾空白后的原生哈希，保持写入与查询规范一致
             String nativeHash = nativeHash(hash);
             if (uploaded.contains(nativeHash)) {
@@ -74,12 +75,8 @@ public final class SharedPreferencesBackupHashStore implements BackupHashStore {
                 preferences.getStringSet(key, Set.of())
         );
         uploaded.add(nativeHash(hash));
-        try {
-            if (!preferences.edit().putStringSet(key, uploaded).commit()) {
-                throw new IOException("群晖备份哈希索引保存失败");
-            }
-        } catch (RuntimeException /* SharedPreferences 写入时抛出的运行时错误 */ error) {
-            throw new IOException("群晖备份哈希索引不可写", error);
+        if (!preferences.edit().putStringSet(key, uploaded).commit()) {
+            throw new IOException("群晖备份哈希索引保存失败");
         }
     }
 
@@ -122,7 +119,7 @@ public final class SharedPreferencesBackupHashStore implements BackupHashStore {
             // 按固定区域设置把摘要编码为稳定的小写十六进制文本
             StringBuilder result = new StringBuilder(digest.length * 2);
             // 逐字节编码摘要，避免受默认区域设置影响
-            for (byte item : digest) {
+            for (byte /* 当前编码的摘要字节 */ item : digest) {
                 result.append(String.format(Locale.ROOT, "%02x", item & 0xff));
             }
             return result.toString();

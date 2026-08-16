@@ -9,6 +9,7 @@ import java.io.ByteArrayInputStream;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertThrows;
 
+/** 验证备份目录拼接、名称清理和同名冲突路径规则 */
 public final class BackupPathPolicyTest {
     /** 验证设备和相册名称不会改变配置指定的唯一备份目录 */
     @Test
@@ -60,14 +61,33 @@ public final class BackupPathPolicyTest {
         assertEquals("照片文件名没有可用字符", error.getMessage());
     }
 
+    /** 验证 DSM 根目录不会在备份目录前产生重复斜线 */
+    @Test
+    public void joinsBackupFolderDirectlyUnderDsmRoot() {
+        // 生成以 DSM 根目录为图片范围的首选备份路径
+        BackupPath path = BackupPathPolicy.primary(config("/"), request("IMG_1.jpg"));
+
+        assertEquals("/手机备份/IMG_1.jpg", path.remotePath());
+    }
+
     /** @return 使用自定义备份目录的固定群晖测试配置 */
     private static SynologyConfig config() {
+        return config("/home/Photos");
+    }
+
+    /**
+     * 创建远端图片根目录可变的固定群晖测试配置
+     *
+     * @param remoteRoot 参与备份路径拼接的 DSM 图片根目录
+     * @return 使用自定义备份目录的固定群晖配置
+     */
+    private static SynologyConfig config(String remoteRoot) {
         return new SynologyConfig(
                 "https://nas.example.test",
                 "user",
                 "pass",
                 "",
-                "/home/Photos",
+                remoteRoot,
                 true,
                 "手机备份"
         );

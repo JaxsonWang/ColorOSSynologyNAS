@@ -2,6 +2,7 @@ package com.jaxson.coloros.synologynas.backup;
 
 import com.jaxson.coloros.synologynas.SynologyConfig;
 
+/** 集中执行固定备份目录、文件名清理和同名冲突路径规则 */
 public final class BackupPathPolicy {
     /** 禁止实例化仅承载备份路径规则的工具类 */
     private BackupPathPolicy() {
@@ -47,12 +48,11 @@ public final class BackupPathPolicy {
      * @return 不含末尾斜线的 DSM 备份文件夹路径
      */
     private static String folder(SynologyConfig config) {
-        // 保存移除末尾斜线过程中的图片根目录
+        // 使用配置模型已经规范化的根目录直接拼接单层备份目录
         String root = config.remoteRoot();
-        while (root.endsWith("/")) {
-            root = root.substring(0, root.length() - 1);
-        }
-        return root + "/" + config.backupFolder();
+        return "/".equals(root)
+                ? root + config.backupFolder()
+                : root + "/" + config.backupFolder();
     }
 
     /**

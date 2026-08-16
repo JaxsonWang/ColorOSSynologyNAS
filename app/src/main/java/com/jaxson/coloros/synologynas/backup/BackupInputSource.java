@@ -3,6 +3,7 @@ package com.jaxson.coloros.synologynas.backup;
 import java.io.IOException;
 import java.io.InputStream;
 
+/** 为照片校验和上传分别提供从起点读取的独立输入流 */
 @FunctionalInterface
 public interface BackupInputSource {
     /**

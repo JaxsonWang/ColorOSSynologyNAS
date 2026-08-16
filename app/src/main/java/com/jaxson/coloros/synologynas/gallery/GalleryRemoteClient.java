@@ -5,9 +5,11 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Arrays;
 import java.util.List;
 
+// 为 ColorOS Provider 提供群晖浏览、下载和删除调用边界
 public final class GalleryRemoteClient {
     // 提供群晖配置、图库清单、媒体读取和删除能力的数据源
     private final RemoteGalleryDataSource repository;
@@ -95,13 +97,22 @@ public final class GalleryRemoteClient {
     // 定位当前 ColorOS 原图回调固定的双参数 invoke 方法
     private static Method findCallbackMethod(Object callback /* ColorOS 原图回调对象 */)
             throws IOException {
-        for (Method method : callback.getClass().getMethods()) { // 回调公开候选方法
-            if ("invoke".equals(method.getName()) && method.getParameterCount() == 2) {
-                method.setAccessible(true);
-                return method;
+        try {
+            // 当前版本 Kotlin Function2 回调在 JVM 上公开的精确桥接方法
+            Method method = callback.getClass().getMethod(
+                    "invoke",
+                    Object.class,
+                    Object.class
+            );
+            if (method.getReturnType() != Object.class
+                    || Modifier.isStatic(method.getModifiers())) {
+                throw new NoSuchMethodException("ColorOS callback invoke bridge");
             }
+            method.setAccessible(true);
+            return method;
+        } catch (NoSuchMethodException error /* 回调缺少精确签名 */) {
+            throw new IOException("ColorOS 相册原图回调契约不匹配", error);
         }
-        throw new IOException("ColorOS 相册原图回调契约不匹配");
     }
 
     // 调用 ColorOS 原图回调，并将反射失败映射为明确的图片写入错误
@@ -113,8 +124,10 @@ public final class GalleryRemoteClient {
     ) throws IOException {
         try {
             method.invoke(callback, bytes, completed);
-        } catch (IllegalAccessException | InvocationTargetException error
-                 /* ColorOS 原图回调调用异常 */) {
+        } catch (
+                // ColorOS 原图回调调用异常
+                IllegalAccessException | InvocationTargetException error
+        ) {
             // 反射包装异常中需要向上游暴露的真实失败原因
             Throwable cause = error instanceof InvocationTargetException
                     && ((InvocationTargetException) error).getCause() != null
@@ -124,6 +137,7 @@ public final class GalleryRemoteClient {
         }
     }
 
+    // 将顺序 OutputStream 写入转换为 Kotlin Function2 原图回调
     private static final class CallbackOutputStream extends OutputStream {
         // 接收群晖原图分块的 ColorOS 回调对象
         private final Object callback;

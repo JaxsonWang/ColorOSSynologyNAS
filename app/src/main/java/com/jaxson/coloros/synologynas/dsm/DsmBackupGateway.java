@@ -26,6 +26,15 @@ public interface DsmBackupGateway {
     String login(DsmApiCatalog catalog) throws IOException;
 
     /**
+     * 注销当前 DSM 备份会话
+     *
+     * @param catalog DSM API 目录
+     * @param sid 当前内存 SID
+     * @throws IOException 注销失败
+     */
+    void logout(DsmApiCatalog catalog, String sid) throws IOException;
+
+    /**
      * 查询远端文件 MD5
      *
      * @param catalog DSM API 目录
@@ -49,10 +58,10 @@ public interface DsmBackupGateway {
      * @throws IOException 上传失败
      */
     long upload(
-            DsmApiCatalog catalog,
-            String sid,
-            BackupPath path,
-            long fileSize,
-            InputStream input
+            /* catalog 是 DSM API 目录 */ DsmApiCatalog catalog,
+            /* sid 是当前内存 SID */ String sid,
+            /* path 是远端备份路径 */ BackupPath path,
+            /* fileSize 是预期照片字节数 */ long fileSize,
+            /* input 是本机照片输入流 */ InputStream input
     ) throws IOException;
 }

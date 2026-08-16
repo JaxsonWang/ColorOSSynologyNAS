@@ -14,7 +14,7 @@ ColorOS 自带相册 → 图集 → 私有云图集
 群晖 NAS 设备与远程相册列表
         │ libxposed RemotePreferences 配置通道
         │ DSM 7 File Station API
-        │ SYNO.API.Info / Auth / List / Thumb / Download / Delete
+        │ SYNO.API.Info / Auth / List / Thumb / Download / Delete / Upload / MD5
         ▼
 远程缩略图与原图按需流式读取
         ▼
@@ -39,7 +39,6 @@ DSM 配置页；相册浏览入口仍只存在于 ColorOS 自带相册。
 - `com.oplus.aiunit.vision.hda.c(String, boolean, boolean)`
 - `com.oplus.aiunit.vision.hda.d(int, String, boolean)`
 - `com.oplus.aiunit.vision.goq.a(Context, String, DiagnosePage, int)`
-- `com.oplus.aiunit.vision.bug.w(long)`
 - `com.oplus.aiunit.vision.enn.i()`
 - `com.oplus.aiunit.vision.h9q.e(BaseViewHolder, int, wfb0)`
 - `com.oplus.aiunit.vision.h9q.l(Integer, NasDeviceAvailability)`
@@ -58,7 +57,8 @@ Hook 仅在相册版本号精确等于 `16050008` 时安装。模块复用相册
 - 通过 `SYNO.Core.System` 读取 NAS 具体型号并写入私有云图集卡片；
 - 登录 session 固定命名为 `ColorOSSynologyNAS`，SID 只保留在进程内存中；
 - Synology Photos 个人空间默认目录为 `/home/Photos`，共享空间使用 `/photo`；
-- “保存并连接”验证登录、File Station API 和已配置的远端目录；
+- “保存并连接”验证登录、File Station API 和已配置的远端目录，启用备份时同时要求
+  `SYNO.FileStation.Upload` 与 `SYNO.FileStation.MD5` 支持 v2；
 - 模块 App 内的密码和 OTP 通过 Android Keystore AES-256-GCM 加密保存；
 - Hook 运行配置通过 libxposed 的模块专属 RemotePreferences 发布给相册进程；
 - 相册、图片元数据和缩略图从 DSM 按需读取，原图直接流入 ColorOS 相册回调；

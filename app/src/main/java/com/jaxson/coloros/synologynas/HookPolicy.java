@@ -28,9 +28,9 @@ public final class HookPolicy {
      * @return 三项目标信息完全匹配时返回 true
      */
     public static boolean isSupportedTarget(
-            String packageName,
-            String processName,
-            long versionCode
+            String packageName, // 当前加载的 Android 包名
+            String processName, // 当前模块实例所在进程名
+            long versionCode // 当前安装的相册构建版本
     ) {
         return TARGET_PACKAGE.equals(packageName)
                 && TARGET_PACKAGE.equals(processName)
@@ -75,32 +75,6 @@ public final class HookPolicy {
      */
     public static boolean shouldApplySynologyAvailability(String deviceUserId) {
         return isSynologyDevice(deviceUserId);
-    }
-
-    /**
-     * 只替换精确匹配飞牛 NAS 品牌名的短文案
-     *
-     * @param value 相册原方法返回的文案
-     * @return 群晖品牌名或保持不变的原文案
-     */
-    public static String rewriteNasLabel(String value) {
-        if ("飞牛 NAS".equals(value) || "FeiNiu NAS".equals(value)) {
-            return "群晖 NAS";
-        }
-        return value;
-    }
-
-    /**
-     * 仅将包含飞牛品牌的 NAS 状态说明替换为群晖实际能力描述
-     *
-     * @param value 相册原方法返回的状态说明
-     * @return 群晖状态说明或保持不变的原文案
-     */
-    public static String rewriteNasStateMessage(String value) {
-        if (value != null && (value.contains("飞牛") || value.contains("FeiNiu"))) {
-            return "群晖 NAS 图片已接入私有云图集，可直接浏览和下载";
-        }
-        return value;
     }
 
     /**

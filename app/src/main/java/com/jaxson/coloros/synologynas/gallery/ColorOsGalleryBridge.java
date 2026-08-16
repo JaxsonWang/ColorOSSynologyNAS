@@ -11,6 +11,7 @@ import java.util.ArrayList;
 import java.util.Map;
 import java.util.function.IntSupplier;
 
+// 连接 ColorOS 私有 NAS DTO、状态、首页入口和 Provider 注册表
 public final class ColorOsGalleryBridge {
     // 定位 ColorOS NAS 实现和管理核心对象
     private static final String NAS_IMPL = "com.oplus.aiunit.vision.alq";
@@ -38,7 +39,7 @@ public final class ColorOsGalleryBridge {
     }
 
     // 将 FEINIU 注册表槽位替换为保留原 Provider 转发能力的群晖代理
-    public static void replaceProvider(
+    public static boolean replaceProvider(
             Object cloudSyncProxy, // ColorOS CloudSyncProxyDM 实例
             ClassLoader classLoader, // 解析相册私有类型的类加载器
             GalleryRemoteClient client, // 执行群晖浏览、预览和删除的客户端
@@ -46,9 +47,17 @@ public final class ColorOsGalleryBridge {
             IntSupplier photoCount // 读取相册侧缓存照片数的供应器
     ) throws ReflectiveOperationException {
         // CloudSyncProxyDM 中固定类型为 alq 的 NAS 管理对象
-        Object nas = ColorOsGalleryReflection.readFieldByType(cloudSyncProxy, NAS_IMPL);
+        Object nas = ColorOsGalleryReflection.readTypedField(
+                cloudSyncProxy,
+                "d",
+                NAS_IMPL
+        );
         // alq 中固定类型为 xhb 的 Provider 注册表
-        Object registry = ColorOsGalleryReflection.readFieldByType(nas, NAS_REGISTRY);
+        Object registry = ColorOsGalleryReflection.readTypedField(
+                nas,
+                "a",
+                NAS_REGISTRY
+        );
         // xhb 中以 NasProvider 为键保存 dpk 实例的唯一映射
         Map<Object, Object> providers = ColorOsGalleryReflection.registryMap(registry);
         // ColorOS 原生 NAS 页面当前使用的 FEINIU 枚举槽位
@@ -59,8 +68,11 @@ public final class ColorOsGalleryBridge {
         );
         // 需要保留给非群晖请求继续调用的原飞牛 Provider
         Object original = providers.get(feiniu);
-        if (original == null || ColorOsNasProviderProxy.isSynologyProvider(original)) {
-            return;
+        if (ColorOsNasProviderProxy.isSynologyProvider(original)) {
+            return false;
+        }
+        if (original == null) {
+            throw new IllegalStateException("ColorOS NAS registry is missing FEINIU provider");
         }
         providers.put(
                 feiniu,
@@ -72,6 +84,7 @@ public final class ColorOsGalleryBridge {
                         photoCount
                 )
         );
+        return true;
     }
 
     // 保留其他 NAS 设备并以当前型号和状态重建唯一群晖设备 DTO
@@ -188,6 +201,7 @@ public final class ColorOsGalleryBridge {
         }
         // 跳过群晖合成项后应交还原方法继续处理的位置
         int nextIndex = currentIndex;
+        // 逐项越过当前位置开始的连续群晖合成设备
         while (nextIndex < devices.size() && isSyntheticDevice(devices.get(nextIndex))) {
             nextIndex++;
         }
@@ -244,7 +258,11 @@ public final class ColorOsGalleryBridge {
     public static boolean isConfiguredManager(Object manager /* ColorOS alq 管理对象 */)
             throws ReflectiveOperationException {
         // alq 中固定类型为 xhb 的 Provider 注册表
-        Object registry = ColorOsGalleryReflection.readFieldByType(manager, NAS_REGISTRY);
+        Object registry = ColorOsGalleryReflection.readTypedField(
+                manager,
+                "a",
+                NAS_REGISTRY
+        );
         // xhb 中以 NasProvider 为键保存 dpk 实例的唯一映射
         Map<Object, Object> providers = ColorOsGalleryReflection.registryMap(registry);
         // ColorOS 原生 NAS 页面当前使用的 FEINIU 枚举槽位

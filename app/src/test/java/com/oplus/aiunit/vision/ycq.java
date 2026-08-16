@@ -1,5 +1,6 @@
 package com.oplus.aiunit.vision;
 
+// 模拟 ColorOS NAS 备份目标路径的数据合同
 public final class ycq {
     // 模拟 ycq.a 的临时或备份目录字段
     public final String a;

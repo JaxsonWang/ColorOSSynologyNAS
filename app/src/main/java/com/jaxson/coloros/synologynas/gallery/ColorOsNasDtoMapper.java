@@ -4,6 +4,7 @@ import java.lang.reflect.Constructor;
 import java.util.ArrayList;
 import java.util.List;
 
+// 将群晖相册领域模型映射为 ColorOS 当前私有 DTO
 final class ColorOsNasDtoMapper {
     // 定位 ColorOS 当前版本的 NAS 相册 DTO
     private static final String ALBUM_DTO = "com.oplus.aiunit.vision.b3q";
@@ -45,8 +46,19 @@ final class ColorOsNasDtoMapper {
             throws ReflectiveOperationException {
         // 当前 ColorOS 相册 DTO 的运行时类型
         Class<?> type = Class.forName(ALBUM_DTO, false, galleryClassLoader);
-        // 当前版本唯一用于 NAS 相册数据的混淆构造器
-        Constructor<?> constructor = type.getDeclaredConstructors()[0];
+        // 当前版本 NAS 相册 DTO 的精确十参数构造器
+        Constructor<?> constructor = type.getDeclaredConstructor(
+                feiniuProvider.getClass(),
+                int.class,
+                String.class,
+                String.class,
+                String.class,
+                int.class,
+                int.class,
+                String.class,
+                int.class,
+                long.class
+        );
         constructor.setAccessible(true);
         return constructor.newInstance(
                 feiniuProvider,
@@ -69,13 +81,27 @@ final class ColorOsNasDtoMapper {
         List<Object> result = new ArrayList<>(photos.size());
         // 当前 ColorOS 照片 DTO 的运行时类型
         Class<?> type = Class.forName(NAS_PHOTO_INFO, false, galleryClassLoader);
-        // 当前版本唯一用于 NAS 照片数据的混淆构造器
-        Constructor<?> constructor = type.getDeclaredConstructors()[0];
-        constructor.setAccessible(true);
         // 图片媒体类型枚举值，群晖清单已限制为图片
         Object image = enumValue(NAS_PHOTO_MEDIA_TYPE, "IMAGE");
         // 非实况照片枚举值，DSM File Station 当前只提供单文件图片
         Object noLivePhoto = enumValue(NAS_PHOTO_LIVE_TYPE, "NONE");
+        // 当前版本 NAS 照片 DTO 的精确十三参数构造器
+        Constructor<?> constructor = type.getDeclaredConstructor(
+                int.class,
+                String.class,
+                String.class,
+                String.class,
+                long.class,
+                Integer.class,
+                Integer.class,
+                String.class,
+                Long.class,
+                image.getClass(),
+                noLivePhoto.getClass(),
+                boolean.class,
+                int.class
+        );
+        constructor.setAccessible(true);
         for (RemotePhoto photo : photos) { // 当前需要映射的群晖照片
             result.add(constructor.newInstance(
                     photo.galleryId(),

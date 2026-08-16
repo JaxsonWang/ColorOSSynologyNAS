@@ -20,6 +20,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 
+/** 串行执行哈希查重、DSM 内容判断、上传和成功后索引提交 */
 public final class SynologyBackupRepository implements BackupRepository {
     // 提供当前已保存且可解密的群晖配置
     private final SynologyConfigSource configSource;
@@ -38,8 +39,8 @@ public final class SynologyBackupRepository implements BackupRepository {
      * @param hashStore 照片备份哈希索引
      */
     public SynologyBackupRepository(
-            SynologyConfigSource configSource,
-            BackupHashStore hashStore
+            SynologyConfigSource configSource, // 提供当前群晖配置快照的唯一来源
+            BackupHashStore hashStore // 记录远端确认成功的照片原生哈希
     ) {
         this(configSource, hashStore, DsmBackupClient::new);
     }
@@ -52,9 +53,9 @@ public final class SynologyBackupRepository implements BackupRepository {
      * @param clientFactory 按配置创建 DSM 备份网关的工厂
      */
     SynologyBackupRepository(
-            SynologyConfigSource configSource,
-            BackupHashStore hashStore,
-            Function<SynologyConfig, DsmBackupGateway> clientFactory
+            SynologyConfigSource configSource, // 提供当前群晖配置快照的唯一来源
+            BackupHashStore hashStore, // 记录远端确认成功的照片原生哈希
+            Function<SynologyConfig, DsmBackupGateway> clientFactory // 按配置创建 DSM 网关
     ) {
         this.configSource = configSource;
         this.hashStore = hashStore;
@@ -88,7 +89,9 @@ public final class SynologyBackupRepository implements BackupRepository {
      * @throws IOException 配置读取或索引查询失败
      */
     @Override
-    public Set<String> findExistingHashes(Collection<String> hashes) throws IOException {
+    public Set<String> findExistingHashes(
+            Collection<String> hashes /* ColorOS 请求查询的原生哈希集合 */
+    ) throws IOException {
         // 加载当前启用配置，使查询与上传使用完全相同的作用域规则
         SynologyConfig config = loadEnabledConfig();
         return hashStore.findExisting(config, hashes);
@@ -101,29 +104,52 @@ public final class SynologyBackupRepository implements BackupRepository {
      * @return 可映射回 ColorOS 私有合约的明确结果
      */
     @Override
-    public synchronized BackupUploadResult upload(BackupUploadRequest request) {
+    public synchronized BackupUploadResult upload(
+            BackupUploadRequest request /* ColorOS 相册提供的照片备份请求 */
+    ) {
+        // 先读取配置，使配置格式错误不会被误判为 ColorOS 照片字段错误
+        SynologyConfig config;
         try {
-            // 读取当前启用配置并作为本次上传全链路唯一配置快照
-            SynologyConfig config = loadEnabledConfig();
+            config = loadEnabledConfig();
+        } catch (IOException /* 配置缺失、关闭或凭据读取失败 */ error) {
+            return BackupUploadResult.failed(
+                    BackupUploadResult.ErrorCode.UPLOAD_FAILED,
+                    error.getMessage()
+            );
+        }
+
+        try {
             if (!hashStore.findExisting(config, Set.of(request.fileHash())).isEmpty()) {
                 return BackupUploadResult.alreadyExists("照片已存在于群晖备份索引");
             }
+        } catch (IOException /* 本地哈希索引查询失败 */ error) {
+            return BackupUploadResult.failed(
+                    BackupUploadResult.ErrorCode.UPLOAD_FAILED,
+                    error.getMessage()
+            );
+        }
 
+        // 在创建 DSM 会话前完成纯本地路径校验，非法照片名不得触发网络访问
+        BackupPath primary;
+        try {
+            primary = BackupPathPolicy.primary(config, request);
+        } catch (IllegalArgumentException /* 照片名称不满足 DSM 路径约束 */ error) {
+            return BackupUploadResult.failed(
+                    BackupUploadResult.ErrorCode.READ_DATA_FAILED,
+                    error.getMessage()
+            );
+        }
+
+        try {
             // 获取与本次配置精确绑定的 DSM API 目录和认证会话
             Session activeSession = requireSession(config);
             // 根据远端同名文件的 MD5 内容确定首选、冲突或无需上传目标
-            BackupPath target = resolveTarget(activeSession, config, request);
+            BackupPath target = resolveTarget(activeSession, config, request, primary);
             // 保存 DSM 上传接口确认的写入字节数；远端已存在时保持为零
             long bytesWritten = 0L;
             if (target != null) {
                 try (InputStream /* 本次 DSM 上传独占的照片输入流 */ input =
-                             request.inputSource().open()) {
-                    if (input == null) {
-                        return BackupUploadResult.failed(
-                                BackupUploadResult.ErrorCode.READ_DATA_FAILED,
-                                "ColorOS 相册未提供照片输入流"
-                        );
-                    }
+                             openPhotoInput(request.inputSource())) {
                     bytesWritten = activeSession.client.upload(
                             activeSession.catalog,
                             activeSession.sid,
@@ -134,14 +160,14 @@ public final class SynologyBackupRepository implements BackupRepository {
                 } catch (DsmBackupReadException /* DSM 上传读取照片失败 */ error) {
                     return BackupUploadResult.failed(
                             BackupUploadResult.ErrorCode.READ_DATA_FAILED,
-                            message(error)
+                            error.getMessage()
                     );
                 } catch (DsmRemoteFileAlreadyExistsException /* 上传时远端目标已存在 */ error) {
-                    return BackupUploadResult.alreadyExists(message(error));
+                    return BackupUploadResult.alreadyExists(error.getMessage());
                 } catch (IOException /* DSM 上传请求或响应处理失败 */ error) {
                     return BackupUploadResult.failed(
                             BackupUploadResult.ErrorCode.UPLOAD_FAILED,
-                            message(error)
+                            error.getMessage()
                     );
                 }
             }
@@ -151,7 +177,7 @@ public final class SynologyBackupRepository implements BackupRepository {
             } catch (IOException /* 远端成功后的本地哈希索引提交失败 */ error) {
                 return BackupUploadResult.failed(
                         BackupUploadResult.ErrorCode.UPLOAD_NOTICE_FAILED,
-                        message(error)
+                        error.getMessage()
                 );
             }
             if (target == null) {
@@ -161,18 +187,36 @@ public final class SynologyBackupRepository implements BackupRepository {
         } catch (DsmBackupReadException /* 远端内容校验前读取照片失败 */ error) {
             return BackupUploadResult.failed(
                     BackupUploadResult.ErrorCode.READ_DATA_FAILED,
-                    message(error)
+                    error.getMessage()
             );
-        } catch (IllegalArgumentException /* ColorOS 请求字段不满足备份合约 */ error) {
-            return BackupUploadResult.failed(
-                    BackupUploadResult.ErrorCode.READ_DATA_FAILED,
-                    message(error)
-            );
-        } catch (IOException /* 配置、发现、认证或远端校验失败 */ error) {
+        } catch (IOException /* DSM 发现、认证或远端校验失败 */ error) {
             return BackupUploadResult.failed(
                     BackupUploadResult.ErrorCode.UPLOAD_FAILED,
-                    message(error)
+                    error.getMessage()
             );
+        }
+    }
+
+    /**
+     * 打开 DSM 上传独占的照片输入流并统一标记本机读取失败
+     *
+     * @param source ColorOS 提供的可重复打开照片数据源
+     * @return 从照片起始位置读取的非空输入流
+     * @throws DsmBackupReadException 照片输入流无法打开或为空
+     */
+    private static InputStream openPhotoInput(BackupInputSource source)
+            throws DsmBackupReadException {
+        try {
+            // 打开本次上传独占的原始照片数据流
+            InputStream input = source.open();
+            if (input == null) {
+                throw new DsmBackupReadException("ColorOS 相册未提供照片输入流");
+            }
+            return input;
+        } catch (DsmBackupReadException /* 输入源已提供明确读取错误 */ error) {
+            throw error;
+        } catch (IOException /* ColorOS 输入源打开照片失败 */ error) {
+            throw new DsmBackupReadException("打开本机照片输入流失败", error);
         }
     }
 
@@ -182,16 +226,16 @@ public final class SynologyBackupRepository implements BackupRepository {
      * @param activeSession 已完成发现和登录的 DSM 会话
      * @param config 本次上传使用的群晖配置快照
      * @param request ColorOS 相册提供的照片备份请求
+     * @param primary 已完成本地校验的首选 DSM 路径
      * @return 应上传的目标路径；远端已有相同内容时返回 null
      * @throws IOException DSM MD5 查询或本机照片读取失败
      */
     private BackupPath resolveTarget(
-            Session activeSession,
-            SynologyConfig config,
-            BackupUploadRequest request
+            Session activeSession, // 已完成发现和登录的 DSM 会话
+            SynologyConfig config, // 本次上传固定使用的群晖配置快照
+            BackupUploadRequest request, // ColorOS 相册提供的照片备份请求
+            BackupPath primary // 已完成本地校验的首选 DSM 路径
     ) throws IOException {
-        // 生成保留安全原始文件名的首选 DSM 路径
-        BackupPath primary = BackupPathPolicy.primary(config, request);
         // 查询首选路径是否已存在以及存在时的内容 MD5
         Optional<String> primaryHash = activeSession.client.md5(
                 activeSession.catalog,
@@ -242,7 +286,8 @@ public final class SynologyBackupRepository implements BackupRepository {
             byte[] buffer = new byte[64 * 1024];
             // 保存当前一轮实际读取的字节数
             int count;
-            while ((count = input.read(buffer)) != -1) {
+            while (/* 持续读取本机照片直到输入流结束 */
+                    (count = input.read(buffer)) != -1) {
                 if (count > 0) {
                     digest.update(buffer, 0, count);
                 }
@@ -250,7 +295,7 @@ public final class SynologyBackupRepository implements BackupRepository {
             // 按固定区域设置构造 32 位小写十六进制摘要
             StringBuilder result = new StringBuilder(32);
             // 逐字节编码最终 MD5 摘要
-            for (byte item : digest.digest()) {
+            for (byte /* 当前编码的 MD5 摘要字节 */ item : digest.digest()) {
                 result.append(String.format(Locale.ROOT, "%02x", item & 0xff));
             }
             return result.toString();
@@ -268,15 +313,22 @@ public final class SynologyBackupRepository implements BackupRepository {
      *
      * @param config 本次备份使用的完整群晖配置快照
      * @return 与该配置精确绑定的进程内 DSM 会话
-     * @throws IOException DSM API 发现或登录失败
+     * @throws IOException 旧会话注销、DSM API 发现或登录失败
      */
-    private synchronized Session requireSession(SynologyConfig config) throws IOException {
+    private Session requireSession(SynologyConfig config) throws IOException {
         // 计算包含认证字段和根目录的会话绑定指纹
         String fingerprint = fingerprint(config);
-        if (session != null && session.configFingerprint.equals(fingerprint)) {
-            return session;
+        // 保存进入本次配置判断时仍由仓储持有的旧会话
+        Session cachedSession = session;
+        if (cachedSession != null) {
+            if (cachedSession.configFingerprint.equals(fingerprint)) {
+                return cachedSession;
+            }
+            // 配置变化后先清除本地旧会话，注销结果不引入待恢复状态
+            session = null;
+            cachedSession.client.logout(cachedSession.catalog, cachedSession.sid);
         }
-        // 为新配置快照创建 DSM 备份网关
+        // 为已经完成配置校验的新配置快照创建 DSM 备份网关
         DsmBackupGateway client = clientFactory.apply(config);
         // 发现当前 DSM 实际支持的 API 路径和版本
         DsmApiCatalog catalog = client.discoverApis();
@@ -300,8 +352,9 @@ public final class SynologyBackupRepository implements BackupRepository {
                 throw new DsmException("请先在群晖 NAS 模块中保存 DSM 配置");
             }
             return config;
-        } catch (DsmException /* 已具有明确业务语义的配置错误 */ error) {
-            throw error;
+        } catch (IllegalArgumentException | IllegalStateException
+                 /* 已保存配置的值或完整性无效 */ error) {
+            throw new DsmException(error.getMessage(), error);
         } catch (GeneralSecurityException /* 凭据读取或解密错误 */ error) {
             throw new DsmException("群晖凭据读取失败", error);
         }
@@ -336,20 +389,7 @@ public final class SynologyBackupRepository implements BackupRepository {
                 + config.remoteRoot();
     }
 
-    /**
-     * 提取异常中的明确消息，并在消息缺失时保留异常类型
-     *
-     * @param error 需要映射到备份结果的直接失败原因
-     * @return 非空的可观察错误信息
-     */
-    private static String message(Throwable error) {
-        // 读取直接异常消息，避免为正常失败路径额外包装状态
-        String message = error.getMessage();
-        return message == null || message.isBlank()
-                ? error.getClass().getSimpleName()
-                : message;
-    }
-
+    /** 保存与单份认证配置指纹严格绑定的进程内 DSM 会话 */
     private static final class Session {
         // 保存用于确认会话仍匹配当前认证配置的指纹
         private final String configFingerprint;
@@ -369,10 +409,10 @@ public final class SynologyBackupRepository implements BackupRepository {
          * @param sid 仅驻留内存的 DSM 会话标识
          */
         private Session(
-                String configFingerprint,
-                DsmBackupGateway client,
-                DsmApiCatalog catalog,
-                String sid
+                String configFingerprint, // 完整认证配置对应的会话指纹
+                DsmBackupGateway client, // 已完成发现和登录的 DSM 网关
+                DsmApiCatalog catalog, // DSM 实际支持的 API 目录
+                String sid // 仅驻留当前进程内存的 DSM 会话标识
         ) {
             this.configFingerprint = configFingerprint;
             this.client = client;

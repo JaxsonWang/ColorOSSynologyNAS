@@ -3,6 +3,7 @@ package com.jaxson.coloros.synologynas.dsm;
 import com.jaxson.coloros.synologynas.SynologyConfig;
 import com.jaxson.coloros.synologynas.backup.BackupPath;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedOutputStream;
@@ -71,7 +72,9 @@ public final class DsmBackupClient implements DsmBackupGateway {
      * @throws IOException 登录请求或响应失败
      */
     @Override
-    public String login(DsmApiCatalog catalog) throws IOException {
+    public String login(
+            /* catalog 是 DSM 动态发现的 API 目录 */ DsmApiCatalog catalog
+    ) throws IOException {
         // auth 是动态发现的认证 API 描述
         DsmApiInfo auth = catalog.require("SYNO.API.Auth");
         // parameters 完整表达 DSM SID 登录合同
@@ -96,14 +99,32 @@ public final class DsmBackupClient implements DsmBackupGateway {
                 DsmUrlBuilder.encodeParameters(parameters)
         );
         DsmHttpTransport.requireSuccess(auth.name(), response);
-        // data 是登录响应的数据对象
-        JSONObject data = response.optJSONObject("data");
-        // sid 是规范化后的内存会话标识
-        String sid = data == null ? "" : data.optString("sid", "").trim();
-        if (sid.isEmpty()) {
-            throw new DsmException("DSM 登录成功响应缺少 SID");
-        }
-        return sid;
+        return DsmHttpTransport.parseSid(response);
+    }
+
+    /**
+     * 注销当前备份 SID 并严格校验 Auth logout 响应
+     *
+     * @param catalog DSM 动态发现的 API 目录
+     * @param sid 待注销的内存会话标识
+     * @throws IOException 注销请求或 DSM 业务失败
+     */
+    @Override
+    public void logout(
+            /* catalog 是 DSM 动态发现的 API 目录 */ DsmApiCatalog catalog,
+            /* sid 是待注销的内存会话标识 */ String sid
+    ) throws IOException {
+        // auth 是动态发现的认证 API 描述
+        DsmApiInfo auth = catalog.require("SYNO.API.Auth");
+        // url 使用发现的认证路径且不把 SID 写入查询字符串
+        String url = DsmUrlBuilder.build(config.serverUrl(), auth.path(), Map.of());
+        // response 是 DSM 注销响应
+        JSONObject response = DsmHttpTransport.executeJson(
+                "POST",
+                url,
+                DsmUrlBuilder.encodeParameters(DsmClient.logoutParameters(auth, sid))
+        );
+        DsmHttpTransport.requireSuccess(auth.name(), response);
     }
 
     /**
@@ -116,8 +137,11 @@ public final class DsmBackupClient implements DsmBackupGateway {
      * @throws IOException DSM 请求、任务状态或响应格式失败
      */
     @Override
-    public Optional<String> md5(DsmApiCatalog catalog, String sid, String remotePath)
-            throws IOException {
+    public Optional<String> md5(
+            /* catalog 是 DSM 动态发现的 API 目录 */ DsmApiCatalog catalog,
+            /* sid 是当前内存会话标识 */ String sid,
+            /* remotePath 是待查询的完整远端路径 */ String remotePath
+    ) throws IOException {
         // md5Api 是动态发现且明确支持 v2 的 MD5 API
         DsmApiInfo md5Api = catalog.require("SYNO.FileStation.MD5");
         requireVersion(md5Api);
@@ -133,19 +157,16 @@ public final class DsmBackupClient implements DsmBackupGateway {
         String startUrl = DsmUrlBuilder.build(config.serverUrl(), md5Api.path(), startParameters);
         // startResponse 是 MD5 任务启动响应
         JSONObject startResponse = DsmHttpTransport.executeJson("GET", startUrl, null);
-        if (!startResponse.optBoolean("success", false)) {
-            if (isMissingMd5TargetError(errorCode(startResponse))) {
+        if (!DsmHttpTransport.readSuccess(md5Api.name(), startResponse)) {
+            if (isMissingMd5TargetError(
+                    DsmException.requireApiErrorCode(md5Api.name(), startResponse)
+            )) {
                 return Optional.empty();
             }
             throw DsmException.fromApiResponse(md5Api.name(), startResponse);
         }
-        // startData 是 MD5 启动响应的数据对象
-        JSONObject startData = startResponse.optJSONObject("data");
-        // taskId 是规范化后的 MD5 任务标识
-        String taskId = startData == null ? "" : startData.optString("taskid", "").trim();
-        if (taskId.isEmpty()) {
-            throw new DsmException(md5Api.name() + " 启动响应缺少 taskid");
-        }
+        // taskId 是严格读取并规范化后的 MD5 任务标识
+        String taskId = parseTaskId(md5Api.name(), startResponse);
 
         // deadlineNanos 使用单调时钟限定 MD5 任务等待时间
         long deadlineNanos = System.nanoTime() + MD5_TASK_TIMEOUT_MS * 1_000_000L;
@@ -169,16 +190,8 @@ public final class DsmBackupClient implements DsmBackupGateway {
             DsmHttpTransport.requireSuccess(md5Api.name(), statusResponse);
             // data 是 MD5 状态响应的数据对象
             JSONObject data = statusResponse.optJSONObject("data");
-            if (data == null || !data.has("finished")) {
-                throw new DsmException(md5Api.name() + " 状态响应缺少 finished");
-            }
-            if (data.optBoolean("finished", false)) {
-                // hash 是 DSM 返回并规范化的小写 MD5
-                String hash = data.optString("md5", "").trim().toLowerCase(Locale.ROOT);
-                if (!hash.matches("[0-9a-f]{32}")) {
-                    throw new DsmException(md5Api.name() + " 状态响应缺少有效 MD5");
-                }
-                return Optional.of(hash);
+            if (parseMd5Finished(md5Api.name(), data)) {
+                return Optional.of(parseMd5Hash(md5Api.name(), data));
             }
             if (System.nanoTime() >= deadlineNanos) {
                 throw new DsmException("群晖 MD5 任务等待超时");
@@ -200,11 +213,11 @@ public final class DsmBackupClient implements DsmBackupGateway {
      */
     @Override
     public long upload(
-            DsmApiCatalog catalog,
-            String sid,
-            BackupPath path,
-            long fileSize,
-            InputStream input
+            /* catalog 是 DSM 动态发现的 API 目录 */ DsmApiCatalog catalog,
+            /* sid 是当前内存会话标识 */ String sid,
+            /* path 是远端备份目录与文件名 */ BackupPath path,
+            /* fileSize 是 MediaStore 声明的照片字节数 */ long fileSize,
+            /* input 是本机照片输入流 */ InputStream input
     ) throws IOException {
         // uploadApi 是动态发现且明确支持 v2 的上传 API
         DsmApiInfo uploadApi = catalog.require("SYNO.FileStation.Upload");
@@ -301,16 +314,16 @@ public final class DsmBackupClient implements DsmBackupGateway {
      * @throws IOException 响应为空、格式错误、冲突或 DSM 业务失败
      */
     static long parseUploadResponse(
-            String apiName,
-            String body,
-            BackupPath path,
-            long fileSize
+            /* apiName 是动态发现的上传 API 名称 */ String apiName,
+            /* body 是 DSM 上传响应正文 */ String body,
+            /* path 是当前远端备份路径 */ BackupPath path,
+            /* fileSize 是已完整写入请求体的照片字节数 */ long fileSize
     ) throws IOException {
         // response 必须是有效 DSM JSON，空正文不得伪造上传成功
         JSONObject response = DsmHttpTransport.parseJson(apiName, body);
-        if (!response.optBoolean("success", false)) {
+        if (!DsmHttpTransport.readSuccess(apiName, response)) {
             // code 是 DSM 上传业务错误码
-            int code = errorCode(response);
+            int code = DsmException.requireApiErrorCode(apiName, response);
             if (code == 414 || code == 1805) {
                 throw new DsmRemoteFileAlreadyExistsException(
                         "群晖备份文件已存在: " + path.remotePath()
@@ -322,15 +335,83 @@ public final class DsmBackupClient implements DsmBackupGateway {
     }
 
     /**
-     * 读取 DSM JSON 响应中的业务错误码
+     * 严格解析 MD5 启动响应中的任务标识
      *
-     * @param response DSM JSON 响应
-     * @return 错误码；缺失时为 -1
+     * @param apiName 动态发现的 MD5 API 名称
+     * @param response MD5 启动响应
+     * @return 规范化后的非空任务标识
+     * @throws DsmException data 或 taskid 缺失、类型错误或值为空
      */
-    private static int errorCode(JSONObject response) {
-        // error 是 DSM 可选错误对象
-        JSONObject error = response.optJSONObject("error");
-        return error == null ? -1 : error.optInt("code", -1);
+    static String parseTaskId(String apiName, JSONObject response) throws DsmException {
+        try {
+            // data 是 MD5 启动响应中必须保存任务标识的对象
+            JSONObject data = response.getJSONObject("data");
+            if (!data.has("taskid")) {
+                throw new DsmException(apiName + " 启动响应缺少 taskid");
+            }
+            // value 是未经 JSONObject 字符串转换的任务标识原始值
+            Object value = data.get("taskid");
+            if (!(value instanceof String taskIdValue /* 已确认的字符串任务标识 */)) {
+                throw new DsmException(apiName + " 启动响应 taskid 类型错误");
+            }
+            // taskId 是严格读取并规范化后的任务标识
+            String taskId = taskIdValue.trim();
+            if (taskId.isEmpty()) {
+                throw new DsmException(apiName + " 启动响应缺少 taskid");
+            }
+            return taskId;
+        } catch (/* MD5 data 或 taskid 字段格式错误 */ JSONException error) {
+            throw new DsmException(apiName + " 启动响应格式错误", error);
+        }
+    }
+
+    /**
+     * 严格解析已完成 MD5 状态中的摘要
+     *
+     * @param apiName 动态发现的 MD5 API 名称
+     * @param data MD5 状态响应中的 data 对象
+     * @return 规范化小写 MD5
+     * @throws DsmException md5 缺失、类型错误或格式非法
+     */
+    static String parseMd5Hash(String apiName, JSONObject data) throws DsmException {
+        try {
+            if (!data.has("md5")) {
+                throw new DsmException(apiName + " 状态响应缺少有效 MD5");
+            }
+            // value 是未经 JSONObject 字符串转换的 MD5 原始值
+            Object value = data.get("md5");
+            if (!(value instanceof String hashValue /* 已确认的字符串 MD5 */)) {
+                throw new DsmException(apiName + " 状态响应 MD5 类型错误");
+            }
+            // hash 是 DSM 返回并规范化的小写 MD5
+            String hash = hashValue.trim().toLowerCase(Locale.ROOT);
+            if (!hash.matches("[0-9a-f]{32}")) {
+                throw new DsmException(apiName + " 状态响应缺少有效 MD5");
+            }
+            return hash;
+        } catch (/* MD5 摘要字段缺失或类型错误 */ JSONException error) {
+            throw new DsmException(apiName + " 状态响应格式错误", error);
+        }
+    }
+
+    /**
+     * 严格解析 MD5 状态响应的完成标志
+     *
+     * @param apiName 动态发现的 MD5 API 名称
+     * @param data MD5 状态响应中的 data 对象
+     * @return MD5 任务是否完成
+     * @throws DsmException data 缺失、finished 缺失或类型错误
+     */
+    static boolean parseMd5Finished(String apiName, JSONObject data) throws DsmException {
+        if (data == null || !data.has("finished")) {
+            throw new DsmException(apiName + " 状态响应缺少 finished");
+        }
+        // finished 是尚未转换的任务完成标志
+        Object finished = data.opt("finished");
+        if (!(finished instanceof Boolean)) {
+            throw new DsmException(apiName + " 状态响应 finished 类型错误");
+        }
+        return (Boolean) finished;
     }
 
     /**
@@ -339,7 +420,7 @@ public final class DsmBackupClient implements DsmBackupGateway {
      * @param api 待校验的动态 API 描述
      * @throws DsmException API 不支持 v2
      */
-    private static void requireVersion(DsmApiInfo api) throws DsmException {
+    static void requireVersion(DsmApiInfo api) throws DsmException {
         if (api.minVersion() > FILE_STATION_API_VERSION
                 || api.maxVersion() < FILE_STATION_API_VERSION) {
             throw new DsmException(api.name() + " 未提供 v" + FILE_STATION_API_VERSION);

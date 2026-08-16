@@ -9,6 +9,7 @@ import static org.junit.Assert.fail;
 import com.jaxson.coloros.synologynas.SynologyConfig;
 import com.jaxson.coloros.synologynas.SynologyConfigSource;
 import com.jaxson.coloros.synologynas.dsm.DsmApiCatalog;
+import com.jaxson.coloros.synologynas.dsm.DsmException;
 import com.jaxson.coloros.synologynas.dsm.DsmGateway;
 import com.jaxson.coloros.synologynas.dsm.RemoteMedia;
 
@@ -18,7 +19,9 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
 
+// 验证群晖图库快照、分页、删除和配置切换会话生命周期
 public final class RemoteGalleryRepositoryTest {
     // 提供所有仓储场景共享的完整 HTTPS 群晖配置
     private static final SynologyConfig CONFIG = new SynologyConfig(
@@ -175,6 +178,110 @@ public final class RemoteGalleryRepositoryTest {
         assertEquals(1, gateway.listInvocations);
     }
 
+    @Test
+    // 验证配置指纹变化会先注销旧 SID 再认证并读取新配置
+    public void logsOutPreviousSessionWhenConfigurationChanges() throws IOException {
+        // 允许测试过程切换的当前群晖配置引用
+        AtomicReference<SynologyConfig> config = new AtomicReference<>(CONFIG);
+        // 首个配置创建且持有旧 SID 的 DSM 网关
+        FakeDsmGateway first = new FakeDsmGateway(List.of());
+        first.sid = "sid-old";
+        // 第二个配置创建且持有新 SID 的 DSM 网关
+        FakeDsmGateway second = new FakeDsmGateway(List.of());
+        second.sid = "sid-new";
+        // 按当前配置地址选择对应 DSM 网关的待测仓储
+        RemoteGalleryRepository repository = repository(config, first, second);
+        repository.listAlbums(0, 1);
+        config.set(changedConfig());
+        repository.listAlbums(0, 1);
+        assertEquals(1, first.logoutInvocations);
+        assertEquals("sid-old", first.loggedOutSid);
+        assertEquals(1, first.loginInvocations);
+        assertEquals(1, second.loginInvocations);
+        assertEquals(1, second.listInvocations);
+    }
+
+    @Test
+    // 验证旧 SID 注销失败后清空会话快照且后续请求正常认证
+    public void clearsFailedLogoutStateBeforeNextExplicitRequest()
+            throws IOException {
+        // 允许测试过程切换的当前群晖配置引用
+        AtomicReference<SynologyConfig> config = new AtomicReference<>(CONFIG);
+        // 注销时返回固定失败的旧配置 DSM 网关
+        FakeDsmGateway first = new FakeDsmGateway(List.of());
+        first.logoutFailure = new IOException("logout failed");
+        // 本次注销失败请求不应调用的新配置 DSM 网关
+        FakeDsmGateway second = new FakeDsmGateway(List.of());
+        // 按当前配置地址选择对应 DSM 网关的待测仓储
+        RemoteGalleryRepository repository = repository(config, first, second);
+        repository.listAlbums(0, 1);
+        config.set(changedConfig());
+        // 本次配置切换应向调用方暴露的注销异常
+        IOException error = assertThrows(
+                IOException.class,
+                () /* 触发旧 SID 注销失败 */ -> repository.listAlbums(0, 1)
+        );
+        assertEquals("logout failed", error.getMessage());
+        assertEquals(1, first.logoutInvocations);
+        assertEquals(0, second.loginInvocations);
+        assertEquals(0, second.listInvocations);
+        // 保持新配置的后续请求从空状态直接创建新会话和快照
+        repository.listAlbums(0, 1);
+        assertEquals(1, first.logoutInvocations);
+        assertEquals(1, second.loginInvocations);
+        assertEquals(1, second.listInvocations);
+
+        // 回切旧配置必须注销新 SID 并重建旧配置会话和快照
+        config.set(CONFIG);
+        repository.listAlbums(0, 1);
+        assertEquals(1, second.logoutInvocations);
+        assertEquals(2, first.loginInvocations);
+        assertEquals(2, first.listInvocations);
+    }
+
+    @Test
+    // 验证已保存配置损坏统一映射为 DSM 异常且不创建网关
+    public void mapsInvalidStoredConfigurationBeforeCreatingGateway() {
+        for (RuntimeException failure /* 配置值或 schema 完整性异常 */ : List.of(
+                new IllegalArgumentException("群晖服务器地址不能为空"),
+                new IllegalStateException("群晖远程配置格式错误")
+        )) {
+            // 记录配置读取失败前后的 DSM 网关创建次数
+            int[] gatewayCreations = {0};
+            // 每次读取都抛出当前配置损坏异常的配置源
+            SynologyConfigSource configSource = new SynologyConfigSource() {
+                @Override
+                // 固定声明已存在配置，使读取进入损坏配置路径
+                public boolean hasConfig() {
+                    return true;
+                }
+
+                @Override
+                // 模拟真实配置解码或完整性校验失败
+                public SynologyConfig load() {
+                    throw failure;
+                }
+            };
+            // 使用记录网关创建次数的待测仓储
+            RemoteGalleryRepository repository = new RemoteGalleryRepository(
+                    configSource,
+                    ignored /* 仅在配置成功后才允许调用的网关工厂 */ -> {
+                        gatewayCreations[0]++;
+                        return new FakeDsmGateway(List.of());
+                    }
+            );
+
+            // 当前损坏配置对应的统一 DSM 异常
+            DsmException error = assertThrows(
+                    DsmException.class,
+                    repository::probeDeviceModel
+            );
+            assertEquals(failure.getMessage(), error.getMessage());
+            assertTrue(error.getCause() == failure);
+            assertEquals(0, gatewayCreations[0]);
+        }
+    }
+
     // 断言给定无效分页参数会返回包含参数语义的明确异常
     private static void assertInvalidPage(
             int offset, // 待验证的分页起始偏移
@@ -226,6 +333,48 @@ public final class RemoteGalleryRepositoryTest {
         );
     }
 
+    // 使用可切换配置和两个记录网关创建待测仓储
+    private static RemoteGalleryRepository repository(
+            AtomicReference<SynologyConfig> config, // 当前测试配置引用
+            FakeDsmGateway first, // 初始配置对应网关
+            FakeDsmGateway second // 变更配置对应网关
+    ) {
+        // 从原子引用实时返回当前测试配置的来源
+        SynologyConfigSource configSource = new SynologyConfigSource() {
+            @Override
+            // 固定声明测试配置已经存在
+            public boolean hasConfig() {
+                return true;
+            }
+
+            @Override
+            // 返回本次调用时原子引用中的完整配置
+            public SynologyConfig load() {
+                return config.get();
+            }
+        };
+        return new RemoteGalleryRepository(
+                configSource,
+                value /* 当前用于选择网关的群晖配置 */ ->
+                        CONFIG.serverUrl().equals(value.serverUrl()) ? first : second
+        );
+    }
+
+    // 创建仅改变服务器地址且必然生成不同指纹的群晖配置
+    private static SynologyConfig changedConfig() {
+        return new SynologyConfig(
+                "https://nas-new.example.com:5001",
+                CONFIG.username(),
+                CONFIG.password(),
+                CONFIG.otp(),
+                CONFIG.remoteRoot(),
+                CONFIG.deviceModel(),
+                CONFIG.backupEnabled(),
+                CONFIG.backupFolder()
+        );
+    }
+
+    // 记录登录、注销、清单与删除行为的 DSM 网关夹具
     private static final class FakeDsmGateway implements DsmGateway {
         // 保存当前 DSM 清单并在成功删除后同步移除媒体
         private final List<RemoteMedia> inventory;
@@ -233,8 +382,18 @@ public final class RemoteGalleryRepositoryTest {
         private List<RemoteMedia> deletedMedia = List.of();
         // 控制 DSM Delete API 是否抛出指定异常
         private IOException deleteFailure;
+        // 控制 DSM 注销是否抛出指定异常
+        private IOException logoutFailure;
         // 记录 DSM 全量图片清单读取次数
         private int listInvocations;
+        // 记录 DSM 登录调用次数
+        private int loginInvocations;
+        // 记录 DSM 注销调用次数
+        private int logoutInvocations;
+        // 保存登录时返回的测试 SID
+        private String sid = "sid";
+        // 保存最近一次注销收到的旧 SID
+        private String loggedOutSid;
 
         // 使用给定图片清单创建可变 DSM 网关夹具
         private FakeDsmGateway(List<RemoteMedia> inventory /* 初始 DSM 图片清单 */) {
@@ -250,7 +409,21 @@ public final class RemoteGalleryRepositoryTest {
         @Override
         // 返回只存在于测试进程内的固定 SID
         public String login(DsmApiCatalog catalog /* 动态 API 目录测试占位 */) {
-            return "sid";
+            loginInvocations++;
+            return sid;
+        }
+
+        @Override
+        // 记录旧 SID 并按测试场景返回成功或抛出注销异常
+        public void logout(
+                DsmApiCatalog catalog, // 旧会话动态 API 目录测试占位
+                String sid // 待注销的旧会话 SID
+        ) throws IOException {
+            logoutInvocations++;
+            loggedOutSid = sid;
+            if (logoutFailure != null) {
+                throw logoutFailure;
+            }
         }
 
         @Override

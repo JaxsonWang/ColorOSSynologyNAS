@@ -7,21 +7,68 @@ import com.oplus.aiunit.vision.jjq;
 import com.oplus.aiunit.vision.seq;
 import com.oplus.aiunit.vision.teq;
 import com.oplus.aiunit.vision.yjq;
+import com.oplus.gallery.business_lib.nas.NasPhotosAppStatus;
+import com.oplus.gallery.business_lib.nas.NasPhotosAvailabilityStatus;
+import com.oplus.gallery.business_lib.nas.NasProvider;
 import com.oplus.gallery.framework.abilities.cloudsync.nas.api.model.NasBackupUploadErrorCode;
 
 import org.junit.Test;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Set;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+// 验证群晖 Provider 的备份、统计与非群晖转发行为
 public final class ColorOsNasProviderProxyTest {
+    @Test
+    // 验证 Provider 固定能力、配置状态枚举和无设备文本转发合同
+    public void exposesProviderIdentityAndCurrentConfigurationStatus() throws Exception {
+        // 允许测试动态切换配置状态的远端数据源
+        CountingDataSource dataSource = new CountingDataSource();
+        // 为无设备参数的 f 方法返回可观察文本的原 Provider
+        dpk original = new dpk() {
+            @Override
+            // 本场景不使用原 Provider 图库统计
+            public jjq o(String deviceUserId /* 原 Provider 目标设备标识 */) {
+                return null;
+            }
+
+            @Override
+            // 返回必须由代理原样转发的 Provider 固定文本
+            public String f() {
+                return "original-provider";
+            }
+        };
+        // 使用可切换配置状态的数据源创建待测 Provider 代理
+        dpk proxy = proxy(new RecordingBackupService(), original, dataSource);
+
+        assertEquals(NasProvider.FEINIU, proxy.b());
+        assertTrue(proxy.c());
+        assertEquals(
+                NasPhotosAvailabilityStatus.AVAILABLE,
+                proxy.e(GalleryContract.DEVICE_ID)
+        );
+        assertEquals(NasPhotosAppStatus.RUNNING, proxy.n(GalleryContract.DEVICE_ID));
+        assertEquals("original-provider", proxy.f());
+
+        dataSource.configured = false;
+        assertEquals(
+                NasPhotosAvailabilityStatus.UNKNOWN,
+                proxy.e(GalleryContract.DEVICE_ID)
+        );
+        assertEquals(NasPhotosAppStatus.STOPPED, proxy.n(GalleryContract.DEVICE_ID));
+    }
+
     @Test
     // 验证 dpk.o 只读取 Hook 缓存统计而不触发 DSM 清单加载
     public void returnsCachedGalleryStatsWithoutLoadingRemoteInventory() throws Exception {
@@ -69,9 +116,17 @@ public final class ColorOsNasProviderProxyTest {
                 GalleryContract.DEVICE_ID,
                 new ArrayList<>(backupService.existingHashes)
         );
+        // 协程 hash 查询别名映射出的 ColorOS yjq 结果
+        Object coroutineResult = proxy.s(
+                GalleryContract.DEVICE_ID,
+                List.copyOf(backupService.existingHashes),
+                null
+        );
 
         assertTrue(result instanceof yjq.b);
         assertEquals(backupService.existingHashes, ((yjq.b) result).a);
+        assertTrue(coroutineResult instanceof yjq.b);
+        assertEquals(backupService.existingHashes, ((yjq.b) coroutineResult).a);
     }
 
     @Test
@@ -108,8 +163,8 @@ public final class ColorOsNasProviderProxyTest {
                 deviceUserId /* 原 Provider 收到的设备标识 */ -> null
         );
 
-        // 同步上传映射出的 ColorOS teq 结果
-        teq result = proxy.r(request(GalleryContract.DEVICE_ID));
+        // 协程上传入口映射出的 ColorOS teq 结果
+        Object result = proxy.k(request(GalleryContract.DEVICE_ID), null);
 
         assertTrue(result instanceof teq.b);
         // 已确认类型的 ColorOS 上传成功 DTO
@@ -192,13 +247,111 @@ public final class ColorOsNasProviderProxyTest {
         assertTrue(originalStats == proxy.o("feiniu-device"));
     }
 
+    @Test
+    // 验证其余带设备身份的 dpk 方法保持参数与返回对象原样转发
+    public void forwardsRemainingOtherNasMethodsWithoutArgumentRewriting() throws Exception {
+        // 保存所有转发调用的混淆方法名
+        List<String> methodNames = new ArrayList<>();
+        // 保存所有转发调用收到的原始参数数组
+        List<Object[]> forwardedArguments = new ArrayList<>();
+        // 作为三个对象返回路径共用的唯一身份标记
+        Object originalResult = new Object();
+        // 作为同步 hash 查询返回路径的唯一身份标记
+        yjq originalHashResult = new yjq.b(Set.of());
+        // 作为 availability 转发路径的固定原始枚举结果
+        NasPhotosAvailabilityStatus originalAvailability =
+                NasPhotosAvailabilityStatus.UNKNOWN;
+        // 作为应用状态转发路径的固定原始枚举结果
+        NasPhotosAppStatus originalAppStatus = NasPhotosAppStatus.UNKNOWN;
+        // 按方法记录转发参数并返回唯一原始结果的 Provider
+        dpk original = (dpk) Proxy.newProxyInstance(
+                dpk.class.getClassLoader(),
+                new Class<?>[]{dpk.class},
+                (
+                        /* 当前原 Provider 代理实例 */ ignoredProxy,
+                        /* 当前转发调用的方法 */ method,
+                        /* 当前转发调用的原始参数 */ arguments
+                ) -> {
+                    methodNames.add(method.getName());
+                    forwardedArguments.add(arguments);
+                    return switch (method.getName()) {
+                        case "d", "k", "s" -> originalResult;
+                        case "e" -> originalAvailability;
+                        case "i" -> originalHashResult;
+                        case "m" -> 37;
+                        case "n" -> originalAppStatus;
+                        default -> throw new AssertionError(
+                                "unexpected original Provider call: " + method.getName()
+                        );
+                    };
+                }
+        );
+        // 同时持有群晖服务与完整记录原 Provider 的待测代理
+        dpk proxy = proxy(new RecordingBackupService(), original);
+        // 使用非驻留字符串确认设备标识对象没有被代理重建
+        String otherDeviceId = new String("feiniu-device");
+        // 使用唯一集合确认同步 hash 参数保持对象身份
+        ArrayList<String> syncHashes = new ArrayList<>(List.of("sync-hash"));
+        // 使用唯一集合确认协程 hash 参数保持对象身份
+        List<String> asyncHashes = List.of("async-hash");
+        // 使用唯一请求确认协程上传参数保持对象身份
+        seq uploadRequest = request("feiniu-device");
+
+        assertSame(originalResult, proxy.d(otherDeviceId, null));
+        assertSame(originalAvailability, proxy.e(otherDeviceId));
+        assertSame(originalHashResult, proxy.i(otherDeviceId, syncHashes));
+        assertSame(originalResult, proxy.k(uploadRequest, null));
+        assertEquals(37, proxy.m(otherDeviceId));
+        assertSame(originalAppStatus, proxy.n(otherDeviceId));
+        assertSame(originalResult, proxy.s(otherDeviceId, asyncHashes, null));
+
+        assertEquals(List.of("d", "e", "i", "k", "m", "n", "s"), methodNames);
+        assertArrayEquals(new Object[]{otherDeviceId, null}, forwardedArguments.get(0));
+        assertSame(otherDeviceId, forwardedArguments.get(1)[0]);
+        assertArrayEquals(new Object[]{otherDeviceId, syncHashes}, forwardedArguments.get(2));
+        assertArrayEquals(new Object[]{uploadRequest, null}, forwardedArguments.get(3));
+        assertSame(otherDeviceId, forwardedArguments.get(4)[0]);
+        assertSame(otherDeviceId, forwardedArguments.get(5)[0]);
+        assertArrayEquals(
+                new Object[]{otherDeviceId, asyncHashes, null},
+                forwardedArguments.get(6)
+        );
+    }
+
+    @Test
+    // 验证反射调用包装的原 Provider 异常按真实对象向上传播
+    public void propagatesOriginalProviderException() throws Exception {
+        // 作为原 Provider 图库统计失败原因的唯一异常对象
+        IOException expected = new IOException("expected original Provider failure");
+        // 固定抛出唯一异常对象的原 Provider
+        dpk original = deviceUserId /* 原 Provider 收到的设备标识 */ -> {
+            throw expected;
+        };
+        // 同时持有群晖服务与失败原 Provider 的待测代理
+        dpk proxy = proxy(new RecordingBackupService(), original);
+
+        assertSame(
+                expected,
+                assertThrows(IOException.class, () -> proxy.o("feiniu-device"))
+        );
+    }
+
     // 使用统一客户端和缓存照片数创建测试 Provider 代理
     private dpk proxy(
             RecordingBackupService backupService, // 记录群晖备份调用的服务
             dpk original // 接收非群晖请求的原 Provider
     ) throws Exception {
+        return proxy(backupService, original, new CountingDataSource());
+    }
+
+    // 使用指定远端数据源创建测试 Provider 代理
+    private dpk proxy(
+            RecordingBackupService backupService, // 记录群晖备份调用的服务
+            dpk original, // 接收非群晖请求的原 Provider
+            CountingDataSource dataSource // 提供配置状态和远端操作的测试数据源
+    ) throws Exception {
         return (dpk) ColorOsNasProviderProxy.create(
-                new GalleryRemoteClient(new CountingDataSource()),
+                new GalleryRemoteClient(dataSource),
                 backupService,
                 original,
                 getClass().getClassLoader(),
@@ -228,6 +381,7 @@ public final class ColorOsNasProviderProxyTest {
         );
     }
 
+    // 记录备份能力、查重和上传调用的服务夹具
     private static final class RecordingBackupService implements GalleryBackupService {
         // 保存 hash 查询应返回的已存在集合
         private Set<String> existingHashes = Set.of();
@@ -262,14 +416,17 @@ public final class ColorOsNasProviderProxyTest {
         }
     }
 
+    // 记录意外远端清单调用的数据源夹具
     private static final class CountingDataSource implements RemoteGalleryDataSource {
         // 记录任何会导致 DSM 清单访问的相册列表调用
         private int inventoryInvocations;
+        // 控制 Provider 状态枚举读取的当前配置状态
+        private boolean configured = true;
 
         @Override
-        // 为 Provider 状态枚举测试返回已配置
+        // 返回 Provider 状态枚举测试当前设置的配置状态
         public boolean isConfigured() {
-            return true;
+            return configured;
         }
 
         @Override

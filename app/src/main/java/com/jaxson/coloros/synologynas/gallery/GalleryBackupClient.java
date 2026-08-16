@@ -12,6 +12,7 @@ import java.lang.reflect.Method;
 import java.util.Collection;
 import java.util.Set;
 
+// 将 ColorOS 备份请求 DTO 适配到群晖备份领域仓储
 public final class GalleryBackupClient implements GalleryBackupService {
     // 执行群晖备份查重、路径选择与上传的领域仓储
     private final BackupRepository repository;
@@ -38,15 +39,20 @@ public final class GalleryBackupClient implements GalleryBackupService {
     @Override
     // 解析当前版本 seq DTO 并执行上传，解析失败时返回明确读取失败结果
     public BackupUploadResult upload(Object colorOsRequest /* ColorOS 的 seq 请求 DTO */) {
+        // 仅在 ColorOS DTO 解析边界内映射请求读取错误
+        BackupUploadRequest request;
         try {
-            return repository.upload(parseRequest(colorOsRequest));
-        } catch (ReflectiveOperationException | IllegalArgumentException error
-                 /* ColorOS 请求字段或类型不符合固定合约 */) {
+            request = parseRequest(colorOsRequest);
+        } catch (
+                // ColorOS 请求字段或类型不符合固定合约的解析异常
+                ReflectiveOperationException | IllegalArgumentException error
+        ) {
             return BackupUploadResult.failed(
                     BackupUploadResult.ErrorCode.READ_DATA_FAILED,
-                    message(error)
+                    error.getMessage()
             );
         }
+        return repository.upload(request);
     }
 
     // 从当前 ColorOS 运行时 seq.a 精确字段读取备份目标设备标识
@@ -103,27 +109,30 @@ public final class GalleryBackupClient implements GalleryBackupService {
         }
     }
 
-    // 读取请求字符串字段，空值按原有 DTO 语义映射为空字符串
+    // 读取请求字段并严格要求当前 seq 合同中的 String 类型
     private static String stringField(
             Object target, // ColorOS 的 seq 请求 DTO
             String name // 当前版本确认的运行时字段名
     ) throws ReflectiveOperationException {
         // 目标字段反射读取到的原始值
         Object value = readField(target, name);
-        return value == null ? "" : String.valueOf(value);
+        if (!(value instanceof String text /* 已确认的字符串字段值 */)) {
+            throw new IllegalArgumentException("ColorOS 备份请求字段不是字符串: " + name);
+        }
+        return text;
     }
 
-    // 读取请求数字字段并保持其 long 语义
+    // 读取请求字段并严格要求当前 seq 合同中的 Long 类型
     private static long longField(
             Object target, // ColorOS 的 seq 请求 DTO
             String name // 当前版本确认的运行时字段名
     ) throws ReflectiveOperationException {
         // 目标字段反射读取到的原始值
         Object value = readField(target, name);
-        if (!(value instanceof Number number /* 已确认的数字字段值 */)) {
-            throw new IllegalStateException("ColorOS 备份请求字段不是数字");
+        if (!(value instanceof Long number /* 已确认的 long 字段值 */)) {
+            throw new IllegalArgumentException("ColorOS 备份请求字段不是 Long: " + name);
         }
-        return number.longValue();
+        return number;
     }
 
     // 从当前 seq 运行时类型读取一个精确命名的 ColorOS 请求字段
@@ -140,12 +149,4 @@ public final class GalleryBackupClient implements GalleryBackupService {
         return field.get(target);
     }
 
-    // 提取备份请求解析错误的可观察消息
-    private static String message(Throwable error /* 待映射到失败结果的异常 */) {
-        // 异常显式携带的原始消息
-        String message = error.getMessage();
-        return message == null || message.isBlank()
-                ? error.getClass().getSimpleName()
-                : message;
-    }
 }

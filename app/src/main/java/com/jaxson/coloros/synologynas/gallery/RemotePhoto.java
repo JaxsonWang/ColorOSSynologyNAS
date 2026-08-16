@@ -2,6 +2,7 @@ package com.jaxson.coloros.synologynas.gallery;
 
 import com.jaxson.coloros.synologynas.dsm.RemoteMedia;
 
+// 保存映射到 ColorOS 的不可变群晖远端照片
 public final class RemotePhoto {
     // DSM 路径生成且在相同路径下保持稳定的 long 字符串标识
     private final String id;

@@ -62,4 +62,20 @@ public final class DsmDeleteResponseTest {
                         """))
         );
     }
+
+    /** 验证删除完成标志的字符串、数字和空值不会进入轮询超时 */
+    @Test
+    public void rejectsNonBooleanDeleteFinishedValues() {
+        // invalidFinishedValues 保存协议不允许的 finished JSON 值
+        String[] invalidFinishedValues = {"\"true\"", "1", "null"};
+
+        for (/* 当前待拒绝的 finished JSON 值 */ String value : invalidFinishedValues) {
+            assertThrows(
+                    DsmException.class,
+                    () -> DsmClient.parseDeleteFinished(new JSONObject(
+                            "{\"success\":true,\"data\":{\"finished\":" + value + "}}"
+                    ))
+            );
+        }
+    }
 }

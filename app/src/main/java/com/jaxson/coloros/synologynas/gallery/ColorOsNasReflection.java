@@ -1,5 +1,6 @@
 package com.jaxson.coloros.synologynas.gallery;
 
+// 集中解析 ColorOS 私有枚举
 final class ColorOsNasReflection {
     // 禁止实例化只承载 ColorOS 私有反射公共操作的工具类
     private ColorOsNasReflection() {
@@ -15,14 +16,5 @@ final class ColorOsNasReflection {
         // 当前 ColorOS 私有枚举的运行时类型
         Class<?> type = Class.forName(className, false, classLoader);
         return Enum.valueOf((Class<? extends Enum>) type, value);
-    }
-
-    // 提取异常的可观察消息，空消息时保留具体异常类型
-    static String errorMessage(Throwable error /* 待映射的异常 */) {
-        // 异常显式携带的原始消息
-        String message = error.getMessage();
-        return message == null || message.isBlank()
-                ? error.getClass().getSimpleName()
-                : message;
     }
 }

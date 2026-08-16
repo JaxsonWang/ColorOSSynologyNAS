@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import io.github.libxposed.api.XposedInterface;
 
@@ -30,11 +31,10 @@ final class SynologyNasHookState {
     );
     // 保证同一时刻最多存在一次 DSM 连接状态探测
     private final AtomicBoolean nasStatusRefreshInFlight = new AtomicBoolean();
-
-    // 缓存配置或探测得到的真实 NAS 型号，供首页、列表和卡片共享
-    private volatile String currentDeviceModel = GalleryContract.DEFAULT_DEVICE_MODEL;
-    // 缓存当前群晖连接状态，供合成设备和 StateFlow 初值共享
-    private volatile boolean currentNasConnected = false;
+    // 原子保存同一时点的 NAS 型号与连接状态，禁止组合出跨时点快照
+    private final AtomicReference<NasState> currentNasState = new AtomicReference<>(
+            new NasState(GalleryContract.DEFAULT_DEVICE_MODEL, false)
+    );
     // 缓存相册私有 DAO 中已保存的群晖照片数量
     private volatile int currentPhotoCount;
     // 标记相册私有 DAO 是否已有群晖统计，决定能否跳过启动预加载
@@ -53,27 +53,17 @@ final class SynologyNasHookState {
      * 从已发布配置初始化 NAS 型号，不把配置存在推导为连接成功
      *
      * @param remoteClient 读取远程配置的相册客户端
+     * @throws IOException 已发布配置型号无法读取时抛出
      */
-    void initialize(GalleryRemoteClient remoteClient) {
-        try {
-            currentDeviceModel = remoteClient.configuredDeviceModel();
-        } catch (IOException /* 已保存型号读取异常 */ error) {
-            xposed.log(
-                    Log.ERROR,
-                    ColorOsSynologyNasModule.TAG,
-                    "stored Synology device model lookup failed",
-                    error
-            );
+    void initialize(GalleryRemoteClient remoteClient) throws IOException {
+        if (!remoteClient.isConfigured()) {
+            return;
         }
-    }
-
-    /**
-     * 返回当前共享的 NAS 型号
-     *
-     * @return 配置缓存或最近探测得到的 NAS 型号
-     */
-    String deviceModel() {
-        return currentDeviceModel;
+        // 保存初始化前的原子状态，更新型号时保持既有连接状态
+        NasState currentState = currentNasState.get();
+        // 保存已发布配置中最后确认的真实 NAS 型号
+        String deviceModel = remoteClient.configuredDeviceModel();
+        currentNasState.set(new NasState(deviceModel, currentState.connected()));
     }
 
     /**
@@ -82,7 +72,7 @@ final class SynologyNasHookState {
      * @return 最近已知连接状态
      */
     boolean connected() {
-        return currentNasConnected;
+        return currentNasState.get().connected();
     }
 
     /**
@@ -96,7 +86,12 @@ final class SynologyNasHookState {
         if (!HookPolicy.shouldApplySynologyAvailability(deviceUserId)) {
             return false;
         }
-        currentNasConnected = state != null && state == 1;
+        // 将相册 availability 值转换为唯一共享连接状态
+        boolean connected = state != null && state == 1;
+        currentNasState.updateAndGet(
+                /* 保留当前型号并只更新连接状态的原子转换 */ currentState ->
+                        new NasState(currentState.deviceModel(), connected)
+        );
         return true;
     }
 
@@ -153,7 +148,7 @@ final class SynologyNasHookState {
      * @return 当前群晖设备状态快照
      */
     NasState snapshot() {
-        return new NasState(currentDeviceModel, currentNasConnected);
+        return currentNasState.get();
     }
 
     /**
@@ -164,9 +159,9 @@ final class SynologyNasHookState {
      * @param nasStatusFlow 需要更新的相册 MutableStateFlow 实例
      */
     void refreshAsync(
-            ClassLoader classLoader,
-            GalleryRemoteClient remoteClient,
-            Object nasStatusFlow
+            ClassLoader classLoader, // 构造相册状态 DTO 的真实类加载器
+            GalleryRemoteClient remoteClient, // 后台状态探测专用 DSM 客户端
+            Object nasStatusFlow // 接收连接状态更新的相册 MutableStateFlow
     ) {
         if (!nasStatusRefreshInFlight.compareAndSet(false, true)) {
             return;
@@ -180,7 +175,7 @@ final class SynologyNasHookState {
                         classLoader,
                         nasState.connected()
                 );
-            } catch (ReflectiveOperationException | RuntimeException
+            } catch (ReflectiveOperationException
                      /* StateFlow 或相册状态 DTO 更新异常 */ error) {
                 xposed.log(
                         Log.ERROR,
@@ -200,17 +195,20 @@ final class SynologyNasHookState {
      * @param remoteClient 专用于状态探测的 DSM 客户端
      * @return 探测完成后的群晖状态快照
      */
-    private NasState refresh(GalleryRemoteClient remoteClient) {
-        // 在探测失败时保留最近已知型号，避免连接失败改写设备身份展示
-        String model = currentDeviceModel;
+    NasState refresh(GalleryRemoteClient remoteClient) {
+        // 保存探测开始时的原子状态，失败时只沿用同一快照中的型号
+        NasState currentState = currentNasState.get();
+        // 保存本次探测将原子发布并返回的唯一状态快照
+        NasState refreshedState;
         try {
-            model = remoteClient.probeDeviceModel();
-            currentDeviceModel = model;
-            currentNasConnected = true;
-            logInfo("Synology NAS connected: model=" + model);
+            // 保存本次 DSM 探测确认的真实 NAS 型号
+            String deviceModel = remoteClient.probeDeviceModel();
+            refreshedState = new NasState(deviceModel, true);
+            currentNasState.set(refreshedState);
+            logInfo("Synology NAS connected: model=" + deviceModel);
         } catch (IOException /* DSM 连接或型号探测异常 */ error) {
-            currentDeviceModel = model;
-            currentNasConnected = false;
+            refreshedState = new NasState(currentState.deviceModel(), false);
+            currentNasState.set(refreshedState);
             xposed.log(
                     Log.WARN,
                     ColorOsSynologyNasModule.TAG,
@@ -218,7 +216,7 @@ final class SynologyNasHookState {
                     error
             );
         }
-        return new NasState(currentDeviceModel, currentNasConnected);
+        return refreshedState;
     }
 
     /**

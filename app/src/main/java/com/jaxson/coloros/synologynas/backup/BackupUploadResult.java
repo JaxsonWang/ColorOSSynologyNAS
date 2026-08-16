@@ -1,6 +1,8 @@
 package com.jaxson.coloros.synologynas.backup;
 
+/** 表达可精确映射到 ColorOS 私有上传合约的备份结果 */
 public final class BackupUploadResult {
+    /** 区分远端成功、内容已存在和可观察失败三类结果 */
     public enum Status {
         // 表示照片已经成功写入 DSM 且哈希索引已保存
         SUCCESS,
@@ -10,6 +12,7 @@ public final class BackupUploadResult {
         FAILED
     }
 
+    /** 保留 ColorOS 已有备份错误枚举能够表达的失败分类 */
     public enum ErrorCode {
         // 表示 ColorOS 照片数据读取失败
         READ_DATA_FAILED,
@@ -45,12 +48,12 @@ public final class BackupUploadResult {
      * @param bytesWritten DSM 确认写入的字节数
      */
     private BackupUploadResult(
-            Status status,
-            ErrorCode errorCode,
-            String message,
-            String backupFolder,
-            String savedPath,
-            long bytesWritten
+            Status status, // 备份操作的总体状态
+            ErrorCode errorCode, // 失败或已存在时的 ColorOS 错误分类
+            String message, // 可观察的结果信息
+            String backupFolder, // 成功上传使用的 DSM 目标文件夹
+            String savedPath, // 成功上传写入的 DSM 完整路径
+            long bytesWritten // DSM 上传接口确认写入的字节数
     ) {
         this.status = status;
         this.errorCode = errorCode;

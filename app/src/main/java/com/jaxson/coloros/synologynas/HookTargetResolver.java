@@ -5,6 +5,7 @@ import android.content.Context;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
 
@@ -19,10 +20,6 @@ final class HookTargetResolver {
     // 标识入口方法使用的诊断页面枚举类型
     private static final String NAS_DIAGNOSE_PAGE =
             "com.oplus.gallery.basebiz.track.NasConnectionDiagnoseTrackHelper$DiagnosePage";
-    // 标识生成 NAS 文件夹说明的混淆配置类
-    private static final String FOLDER_NOTE_CONFIG = "com.oplus.aiunit.vision.bug";
-    // 标识生成 NAS 状态说明的混淆类
-    private static final String NAS_SYNC_STATE_INFO = "com.oplus.aiunit.vision.zcq";
     // 标识保存各 NAS Provider 实例的相册代理类
     private static final String CLOUD_SYNC_PROXY =
             "com.oplus.gallery.framework.abilities.cloudsync.CloudSyncProxyDM";
@@ -116,18 +113,20 @@ final class HookTargetResolver {
         Constructor<?> cloudSyncProxyConstructor = cloudSyncProxy.getDeclaredConstructor();
         cloudSyncProxyConstructor.setAccessible(true);
         return new HookTargets(
-                findDeclaredMethod(
+                findDeclaredMethodReturning(
                         classLoader,
                         CONFIG_WRAPPER,
                         "c",
+                        boolean.class,
                         String.class,
                         boolean.class,
                         boolean.class
                 ),
-                findDeclaredMethod(
+                findDeclaredMethodReturning(
                         classLoader,
                         CONFIG_WRAPPER,
                         "d",
+                        boolean.class,
                         int.class,
                         String.class,
                         boolean.class
@@ -141,11 +140,19 @@ final class HookTargetResolver {
                         diagnosePage,
                         int.class
                 ),
-                findDeclaredMethod(classLoader, FOLDER_NOTE_CONFIG, "w", long.class),
-                findDeclaredMethod(classLoader, NAS_SYNC_STATE_INFO, "m", Context.class),
                 cloudSyncProxyConstructor,
-                findDeclaredMethod(classLoader, NAS_DEVICE_MANAGER, "b"),
-                findDeclaredMethod(classLoader, NAS_DEVICE_DAO, "f", String.class),
+                findDeclaredMethodReturning(
+                        classLoader,
+                        NAS_DEVICE_MANAGER,
+                        "b",
+                        ArrayList.class
+                ),
+                requireStatic(findDeclaredMethod(
+                        classLoader,
+                        NAS_DEVICE_DAO,
+                        "f",
+                        String.class
+                )),
                 findDeclaredMethod(
                         classLoader,
                         NAS_PRELOAD_HELPER,
@@ -173,7 +180,12 @@ final class HookTargetResolver {
                         Integer.class,
                         nasDeviceAvailability
                 ),
-                findDeclaredField(classLoader, NAS_ALBUMS_VIEW_BINDING, "T"),
+                findDeclaredInstanceField(
+                        classLoader,
+                        NAS_ALBUMS_VIEW_BINDING,
+                        "T",
+                        String.class
+                ),
                 findDeclaredMethod(
                         classLoader,
                         NAS_DEVICE_OFFLINE_BINDING,
@@ -183,22 +195,42 @@ final class HookTargetResolver {
                         String.class,
                         functionOne
                 ),
-                functionOne.getMethod("invoke", Object.class),
+                requireInstance(functionOne.getMethod("invoke", Object.class)),
                 findDeclaredMethod(classLoader, MULTI_DELETE_DIALOG, "invokeSuspend", Object.class),
-                findDeclaredField(classLoader, MULTI_DELETE_DIALOG, "$params"),
-                findDeclaredField(deleteParams, "a"),
+                findDeclaredInstanceField(
+                        classLoader,
+                        MULTI_DELETE_DIALOG,
+                        "$params",
+                        deleteParams
+                ),
+                findDeclaredInstanceField(deleteParams, "a", String.class),
                 findDeclaredMethod(classLoader, SINGLE_DELETE_DIALOG, "invokeSuspend", Object.class),
-                findDeclaredField(classLoader, SINGLE_DELETE_DIALOG, "$itemPath"),
-                findDeclaredMethod(classLoader, MEDIA_PATH, "b", String.class),
-                findDeclaredMethod(classLoader, MEDIA_OBJECT_RESOLVER, "f", mediaPath),
-                findDeclaredField(classLoader, NAS_MEDIA_ITEM, "F0"),
-                findDeclaredMethod(classLoader, NAS_MEDIA_ITEM, "i0"),
-                findDeclaredMethodReturning(
+                findDeclaredInstanceField(
+                        classLoader,
+                        SINGLE_DELETE_DIALOG,
+                        "$itemPath",
+                        String.class
+                ),
+                requireStatic(findDeclaredMethod(classLoader, MEDIA_PATH, "b", String.class)),
+                requireStatic(findDeclaredMethod(
+                        classLoader,
+                        MEDIA_OBJECT_RESOLVER,
+                        "f",
+                        mediaPath
+                )),
+                findDeclaredInstanceField(
+                        classLoader,
+                        NAS_MEDIA_ITEM,
+                        "F0",
+                        String.class
+                ),
+                requireInstance(findDeclaredMethod(classLoader, NAS_MEDIA_ITEM, "i0")),
+                requireInstance(findDeclaredMethodReturning(
                         dialogBuilder,
                         "setMessage",
                         dialogBuilder,
                         CharSequence.class
-                )
+                ))
         );
     }
 
@@ -213,10 +245,10 @@ final class HookTargetResolver {
      * @throws ReflectiveOperationException 类或方法签名不匹配时抛出
      */
     private static Method findDeclaredMethod(
-            ClassLoader classLoader,
-            String className,
-            String methodName,
-            Class<?>... parameterTypes
+            ClassLoader classLoader, // 解析目标声明类的相册类加载器
+            String className, // 声明目标方法的完整类名
+            String methodName, // DEX 中确认的精确方法名
+            Class<?>... parameterTypes // 当前方法的完整参数类型序列
     ) throws ReflectiveOperationException {
         // 按固定类名加载目标声明类，不触发类初始化
         Class<?> targetClass = Class.forName(className, false, classLoader);
@@ -227,20 +259,52 @@ final class HookTargetResolver {
     }
 
     /**
+     * 按声明类、名称、返回类型和参数类型精确解析私有方法
+     *
+     * @param classLoader 相册私有类加载器
+     * @param className 声明目标方法的完整类名
+     * @param methodName DEX 中的原始方法名
+     * @param returnType 目标方法的精确返回类型
+     * @param parameterTypes 目标方法的精确参数类型序列
+     * @return 已设为可访问的唯一目标方法
+     * @throws ReflectiveOperationException 类或完整方法签名不匹配时抛出
+     */
+    private static Method findDeclaredMethodReturning(
+            ClassLoader classLoader, // 解析目标声明类的相册类加载器
+            String className, // 声明目标方法的完整类名
+            String methodName, // DEX 中确认的精确方法名
+            Class<?> returnType, // 当前方法必须匹配的返回类型
+            Class<?>... parameterTypes // 当前方法的完整参数类型序列
+    ) throws ReflectiveOperationException {
+        return findDeclaredMethodReturning(
+                Class.forName(className, false, classLoader),
+                methodName,
+                returnType,
+                parameterTypes
+        );
+    }
+
+    /**
      * 按完整类名和 DEX 原始字段名精确解析私有字段
      *
      * @param classLoader 相册私有类加载器
      * @param className 声明目标字段的完整类名
      * @param fieldName DEX 中的原始字段名
+     * @param fieldType 当前版本确认的精确字段类型
      * @return 已设为可访问的目标字段
      * @throws ReflectiveOperationException 类或字段不匹配时抛出
      */
-    private static Field findDeclaredField(
-            ClassLoader classLoader,
-            String className,
-            String fieldName
+    private static Field findDeclaredInstanceField(
+            ClassLoader classLoader, // 解析目标声明类的相册类加载器
+            String className, // 声明目标字段的完整类名
+            String fieldName, // DEX 中确认的精确字段名
+            Class<?> fieldType // 当前字段必须匹配的实例类型
     ) throws ReflectiveOperationException {
-        return findDeclaredField(Class.forName(className, false, classLoader), fieldName);
+        return findDeclaredInstanceField(
+                Class.forName(className, false, classLoader),
+                fieldName,
+                fieldType
+        );
     }
 
     /**
@@ -248,15 +312,53 @@ final class HookTargetResolver {
      *
      * @param targetClass 声明目标字段的相册私有类
      * @param fieldName DEX 中的原始字段名
+     * @param fieldType 当前版本确认的精确字段类型
      * @return 已设为可访问的目标字段
-     * @throws ReflectiveOperationException 字段不匹配时抛出
+     * @throws ReflectiveOperationException 字段名称、类型或实例性质不匹配时抛出
      */
-    private static Field findDeclaredField(Class<?> targetClass, String fieldName)
+    static Field findDeclaredInstanceField(
+            Class<?> targetClass, // 直接声明目标字段的运行时类型
+            String fieldName, // DEX 中确认的精确字段名
+            Class<?> fieldType // 当前字段必须匹配的实例类型
+    )
             throws ReflectiveOperationException {
         // 按目标类本身声明的固定名称读取字段，禁止遍历猜测
         Field field = targetClass.getDeclaredField(fieldName);
+        if (Modifier.isStatic(field.getModifiers()) || !fieldType.equals(field.getType())) {
+            throw new NoSuchFieldException(
+                    targetClass.getName() + "." + fieldName + ":" + fieldType.getName()
+            );
+        }
         field.setAccessible(true);
         return field;
+    }
+
+    /**
+     * 要求以 null 接收者调用的私有方法保持静态性质
+     *
+     * @param method 已按名称和参数解析的方法
+     * @return 已确认是静态方法的原目标
+     * @throws NoSuchMethodException 目标方法不是静态方法时抛出
+     */
+    static Method requireStatic(Method method) throws NoSuchMethodException {
+        if (!Modifier.isStatic(method.getModifiers())) {
+            throw new NoSuchMethodException(method + " must be static");
+        }
+        return method;
+    }
+
+    /**
+     * 要求以实际对象调用的私有方法保持实例性质
+     *
+     * @param method 已按名称和参数解析的方法
+     * @return 已确认是实例方法的原目标
+     * @throws NoSuchMethodException 目标方法是静态方法时抛出
+     */
+    static Method requireInstance(Method method) throws NoSuchMethodException {
+        if (Modifier.isStatic(method.getModifiers())) {
+            throw new NoSuchMethodException(method + " must be an instance method");
+        }
+        return method;
     }
 
     /**
@@ -269,40 +371,20 @@ final class HookTargetResolver {
      * @return 已设为可访问的唯一目标方法
      * @throws NoSuchMethodException 无声明方法满足完整签名时抛出
      */
-    private static Method findDeclaredMethodReturning(
-            Class<?> targetClass,
-            String methodName,
-            Class<?> returnType,
-            Class<?>... parameterTypes
+    static Method findDeclaredMethodReturning(
+            Class<?> targetClass, // 直接声明目标方法的运行时类型
+            String methodName, // DEX 中确认的精确方法名
+            Class<?> returnType, // 当前方法必须匹配的返回类型
+            Class<?>... parameterTypes // 当前方法的完整参数类型序列
     ) throws NoSuchMethodException {
-        for (Method /* 当前检查的目标类声明方法 */ method
-                : targetClass.getDeclaredMethods()) {
-            if (!methodName.equals(method.getName())
-                    || !returnType.equals(method.getReturnType())) {
-                continue;
-            }
-            // 保存当前候选方法的真实参数类型序列
-            Class<?>[] actualParameterTypes = method.getParameterTypes();
-            if (actualParameterTypes.length != parameterTypes.length) {
-                continue;
-            }
-            // 标记当前候选方法是否完整匹配请求的参数签名
-            boolean parametersMatch = true;
-            for (int /* 当前比较的参数位置 */ index = 0;
-                    index < parameterTypes.length;
-                    index++) {
-                if (!parameterTypes[index].equals(actualParameterTypes[index])) {
-                    parametersMatch = false;
-                    break;
-                }
-            }
-            if (parametersMatch) {
-                method.setAccessible(true);
-                return method;
-            }
+        // 按固定名称和完整参数序列获取唯一目标方法
+        Method method = targetClass.getDeclaredMethod(methodName, parameterTypes);
+        if (!returnType.equals(method.getReturnType())) {
+            throw new NoSuchMethodException(
+                    targetClass.getName() + "." + methodName + " with requested return type"
+            );
         }
-        throw new NoSuchMethodException(
-                targetClass.getName() + "." + methodName + " with requested return type"
-        );
+        method.setAccessible(true);
+        return method;
     }
 }

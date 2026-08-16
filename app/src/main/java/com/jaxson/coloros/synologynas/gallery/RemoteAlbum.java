@@ -1,5 +1,6 @@
 package com.jaxson.coloros.synologynas.gallery;
 
+// 保存映射到 ColorOS 的不可变群晖远端相册
 public final class RemoteAlbum {
     // DSM 目录生成且在相同路径下保持稳定的 long 字符串标识
     private final String id;

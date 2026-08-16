@@ -3,6 +3,7 @@ package com.jaxson.coloros.synologynas.dsm;
 import com.jaxson.coloros.synologynas.SynologyConfig;
 
 import org.json.JSONArray;
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
@@ -111,14 +112,22 @@ final class DsmDeleteOperation {
      */
     static String parseTaskId(JSONObject response) throws DsmException {
         DsmHttpTransport.requireSuccess("SYNO.FileStation.Delete", response);
-        // data 是删除启动响应的数据对象
-        JSONObject data = response.optJSONObject("data");
-        // taskId 是规范化后的删除任务标识
-        String taskId = data == null ? "" : data.optString("taskid", "").trim();
-        if (taskId.isEmpty()) {
-            throw new DsmException("SYNO.FileStation.Delete 启动响应缺少 taskid");
+        try {
+            if (!response.getJSONObject("data").has("taskid")) {
+                throw new DsmException("SYNO.FileStation.Delete 启动响应缺少 taskid");
+            }
+            // taskId 是严格读取并规范化后的删除任务标识
+            String taskId = DsmHttpTransport.requiredString(
+                    response.getJSONObject("data"),
+                    "taskid"
+            ).trim();
+            if (taskId.isEmpty()) {
+                throw new DsmException("SYNO.FileStation.Delete 启动响应缺少 taskid");
+            }
+            return taskId;
+        } catch (/* 删除 data 或 taskid 字段格式错误 */ JSONException error) {
+            throw new DsmException("SYNO.FileStation.Delete 启动响应格式错误", error);
         }
-        return taskId;
     }
 
     /**
@@ -135,7 +144,12 @@ final class DsmDeleteOperation {
         if (data == null || !data.has("finished")) {
             throw new DsmException("SYNO.FileStation.Delete 状态响应缺少 finished");
         }
-        return data.optBoolean("finished", false);
+        // finished 是尚未转换的删除任务完成标志
+        Object finished = data.opt("finished");
+        if (!(finished instanceof Boolean)) {
+            throw new DsmException("SYNO.FileStation.Delete 状态响应 finished 类型错误");
+        }
+        return (Boolean) finished;
     }
 
     /**

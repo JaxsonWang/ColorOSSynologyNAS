@@ -24,6 +24,15 @@ public interface DsmGateway {
     String login(DsmApiCatalog catalog) throws IOException;
 
     /**
+     * 注销当前 DSM 浏览会话
+     *
+     * @param catalog DSM API 目录
+     * @param sid 当前内存 SID
+     * @throws IOException 注销失败
+     */
+    void logout(DsmApiCatalog catalog, String sid) throws IOException;
+
+    /**
      * 获取 DSM 设备型号
      *
      * @param catalog DSM API 目录
@@ -53,10 +62,10 @@ public interface DsmGateway {
      * @throws IOException 下载失败
      */
     void download(
-            DsmApiCatalog catalog,
-            String sid,
-            RemoteMedia media,
-            OutputStream output
+            /* catalog 是 DSM API 目录 */ DsmApiCatalog catalog,
+            /* sid 是当前内存 SID */ String sid,
+            /* media 是远端图片 */ RemoteMedia media,
+            /* output 是调用方输出流 */ OutputStream output
     ) throws IOException;
 
     /**
@@ -70,11 +79,11 @@ public interface DsmGateway {
      * @throws IOException 缩略图读取失败
      */
     void downloadThumbnail(
-            DsmApiCatalog catalog,
-            String sid,
-            RemoteMedia media,
-            String size,
-            OutputStream output
+            /* catalog 是 DSM API 目录 */ DsmApiCatalog catalog,
+            /* sid 是当前内存 SID */ String sid,
+            /* media 是远端图片 */ RemoteMedia media,
+            /* size 是 ColorOS 缩略图尺寸 */ String size,
+            /* output 是调用方输出流 */ OutputStream output
     ) throws IOException;
 
     /**

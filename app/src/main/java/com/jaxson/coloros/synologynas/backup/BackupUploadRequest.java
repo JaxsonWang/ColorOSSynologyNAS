@@ -1,5 +1,6 @@
 package com.jaxson.coloros.synologynas.backup;
 
+/** 保存完成核心字段校验的单张 ColorOS 照片备份请求 */
 public final class BackupUploadRequest {
     // 保存 ColorOS 相册提供的照片原始文件名
     private final String originalName;
@@ -19,10 +20,10 @@ public final class BackupUploadRequest {
      * @param fileHash ColorOS 提供的 SHA-256 原生哈希
      */
     public BackupUploadRequest(
-            String originalName,
-            long fileSize,
-            BackupInputSource inputSource,
-            String fileHash
+            String originalName, // ColorOS 相册提供的照片原始文件名
+            long fileSize, // ColorOS 相册报告的照片字节数
+            BackupInputSource inputSource, // 可重复打开照片内容的数据源
+            String fileHash // ColorOS 提供的 SHA-256 原生哈希
     ) {
         this.originalName = requireText(originalName, "照片文件名");
         if (fileSize < 0L) {

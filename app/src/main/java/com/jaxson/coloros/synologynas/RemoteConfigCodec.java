@@ -3,6 +3,7 @@ package com.jaxson.coloros.synologynas;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+/** 在唯一边界严格编解码跨进程群晖配置 JSON */
 final class RemoteConfigCodec {
     // 标识 RemotePreferences JSON 中的 DSM 服务地址字段
     private static final String KEY_SERVER = "server";
@@ -31,7 +32,9 @@ final class RemoteConfigCodec {
      * @param config 已完成业务校验的群晖配置
      * @return 保留全部配置字段的 JSON 文本
      */
-    static String encode(SynologyConfig config) {
+    static String encode(
+            SynologyConfig config // 已完成业务校验且需要跨进程发布的群晖配置
+    ) {
         try {
             return new JSONObject()
                     .put(KEY_SERVER, config.serverUrl())
@@ -54,22 +57,64 @@ final class RemoteConfigCodec {
      * @param encoded RemotePreferences 中保存的配置 JSON
      * @return 经过 SynologyConfig 校验的配置对象
      */
-    static SynologyConfig decode(String encoded) {
+    static SynologyConfig decode(
+            String encoded // RemotePreferences 中保存的完整配置 JSON
+    ) {
         try {
             // 承载待解码字段并保持 JSON 必填字段的严格读取语义
             JSONObject object = new JSONObject(encoded);
             return new SynologyConfig(
-                    object.getString(KEY_SERVER),
-                    object.getString(KEY_USERNAME),
-                    object.getString(KEY_PASSWORD),
-                    object.getString(KEY_OTP),
-                    object.getString(KEY_REMOTE_ROOT),
-                    object.getString(KEY_DEVICE_MODEL),
-                    object.getBoolean(KEY_BACKUP_ENABLED),
-                    object.getString(KEY_BACKUP_FOLDER)
+                    requiredString(object, KEY_SERVER),
+                    requiredString(object, KEY_USERNAME),
+                    requiredString(object, KEY_PASSWORD),
+                    requiredString(object, KEY_OTP),
+                    requiredString(object, KEY_REMOTE_ROOT),
+                    requiredString(object, KEY_DEVICE_MODEL),
+                    requiredBoolean(object, KEY_BACKUP_ENABLED),
+                    requiredString(object, KEY_BACKUP_FOLDER)
             );
         } catch (JSONException /* JSON 格式或必填字段异常 */ error) {
             throw new IllegalStateException("群晖远程配置格式错误", error);
         }
+    }
+
+    /**
+     * 严格读取 JSON 字符串字段，禁止 Android JSONObject 执行隐式类型转换
+     *
+     * @param object 当前 RemotePreferences 配置 JSON
+     * @param key 必须保存为原生字符串的字段名
+     * @return JSON 中直接保存的字符串值
+     * @throws JSONException 字段缺失或实际类型不是字符串
+     */
+    static String requiredString(
+            JSONObject object, // 当前 RemotePreferences 配置 JSON
+            String key // 必须保存为原生字符串的字段名
+    ) throws JSONException {
+        // 读取原始字段值，避免 Android JSONObject.getString 强制转换数字或布尔值
+        Object value = object.get(key);
+        if (!(value instanceof String)) {
+            throw new JSONException("Remote configuration field is not string: " + key);
+        }
+        return (String) value;
+    }
+
+    /**
+     * 严格读取 JSON 布尔字段，禁止把字符串文本转换为 schema 值
+     *
+     * @param object 当前 RemotePreferences 配置 JSON
+     * @param key 必须保存为原生布尔值的字段名
+     * @return JSON 中直接保存的布尔值
+     * @throws JSONException 字段缺失或实际类型不是布尔值
+     */
+    private static boolean requiredBoolean(
+            JSONObject object, // 当前 RemotePreferences 配置 JSON
+            String key // 必须保存为原生布尔值的字段名
+    ) throws JSONException {
+        // 读取未经 JSONObject 类型转换的原始字段值
+        Object value = object.get(key);
+        if (!(value instanceof Boolean)) {
+            throw new JSONException("Remote configuration field is not boolean: " + key);
+        }
+        return (Boolean) value;
     }
 }

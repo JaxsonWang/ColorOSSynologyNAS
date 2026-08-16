@@ -1,5 +1,6 @@
 package com.jaxson.coloros.synologynas.dsm;
 
+import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.IOException;
@@ -33,9 +34,13 @@ public final class DsmException extends IOException {
      * @return 可直接抛出的 DSM 异常
      */
     static DsmException fromApiResponse(String apiName, JSONObject response) {
-        // code 是 DSM 返回或缺失时的规范错误码
-        int code = apiErrorCode(response);
-        return new DsmException(apiName + " 调用失败，DSM 错误码: " + code);
+        try {
+            // code 是 DSM 明确返回的整数错误码
+            int code = requireApiErrorCode(apiName, response);
+            return new DsmException(apiName + " 调用失败，DSM 错误码: " + code);
+        } catch (/* 失败响应缺少严格错误码 */ DsmException error) {
+            return error;
+        }
     }
 
     /**
@@ -47,7 +52,12 @@ public final class DsmException extends IOException {
      */
     static DsmException fromFileStationListResponse(String folder, JSONObject response) {
         // code 是 DSM 列表业务错误码
-        int code = apiErrorCode(response);
+        int code;
+        try {
+            code = requireApiErrorCode("SYNO.FileStation.List", response);
+        } catch (/* 列表失败响应缺少严格错误码 */ DsmException error) {
+            return error;
+        }
         if (code == 408) {
             return new DsmException(
                     "远端目录不存在: " + folder
@@ -66,12 +76,26 @@ public final class DsmException extends IOException {
     /**
      * 读取 DSM 标准 error.code 字段
      *
+     * @param apiName 当前 DSM API 名称
      * @param response DSM JSON 响应
-     * @return 错误码；字段缺失时为 -1
+     * @return DSM 明确返回的整数错误码
+     * @throws DsmException error.code 缺失、类型错误或超出整数范围
      */
-    private static int apiErrorCode(JSONObject response) {
-        // error 是 DSM 可选错误对象
-        JSONObject error = response.optJSONObject("error");
-        return error == null ? -1 : error.optInt("code", -1);
+    static int requireApiErrorCode(String apiName, JSONObject response) throws DsmException {
+        try {
+            // value 是尚未缩窄为 int 的协议错误码
+            Object value = response.getJSONObject("error").get("code");
+            if (!(value instanceof Integer) && !(value instanceof Long)) {
+                throw new JSONException("error.code 不是整数");
+            }
+            // code 是保留范围检查的长整数错误码
+            long code = ((Number) value).longValue();
+            if (code < Integer.MIN_VALUE || code > Integer.MAX_VALUE) {
+                throw new JSONException("error.code 超出整数范围");
+            }
+            return (int) code;
+        } catch (/* error 或 code 字段缺失和类型错误 */ JSONException error) {
+            throw new DsmException(apiName + " 失败响应格式错误", error);
+        }
     }
 }

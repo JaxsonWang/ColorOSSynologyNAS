@@ -58,9 +58,9 @@ public final class DsmUrlBuilder {
      * @return 完整 DSM API 地址
      */
     public static String build(
-            String baseUrl,
-            String apiPath,
-            Map<String, String> parameters
+            /* baseUrl 是用户配置的 DSM HTTPS 基础地址 */ String baseUrl,
+            /* apiPath 是 SYNO.API.Info 返回的 API 路径 */ String apiPath,
+            /* parameters 是待编码的查询参数 */ Map<String, String> parameters
     ) {
         // normalizedBase 是已验证的 HTTPS 基础地址
         String normalizedBase = normalizeBaseUrl(baseUrl);
@@ -130,6 +130,7 @@ public final class DsmUrlBuilder {
         }
         // result 确保基础路径以斜杠开头并逐步移除末尾斜杠
         String result = path.startsWith("/") ? path : "/" + path;
+        // 循环移除基础路径末尾的全部斜杠
         while (result.endsWith("/")) {
             result = result.substring(0, result.length() - 1);
         }
@@ -145,6 +146,7 @@ public final class DsmUrlBuilder {
     private static String normalizeApiPath(String apiPath) {
         // result 是去除首尾空白和前导斜杠的动态路径
         String result = apiPath == null ? "" : apiPath.trim();
+        // 循环移除动态 API 路径的全部前导斜杠
         while (result.startsWith("/")) {
             result = result.substring(1);
         }

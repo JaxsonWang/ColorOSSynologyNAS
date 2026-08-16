@@ -31,6 +31,7 @@ import java.util.concurrent.TimeoutException;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
+/** 验证同一备份仓储内同名照片路径决策和索引提交的串行语义 */
 public final class SynologyBackupRepositoryConcurrencyTest {
     // 提供第一张同名照片的固定 ColorOS SHA-256 原生哈希
     private static final String FIRST_HASH = "0123456789abcdef0123456789abcdef"
@@ -103,8 +104,8 @@ public final class SynologyBackupRepositoryConcurrencyTest {
      * @return 共享单个会话和事务锁的备份仓储
      */
     private static SynologyBackupRepository repository(
-            ConcurrentHashStore hashStore,
-            ConcurrentGateway gateway
+            ConcurrentHashStore hashStore, // 线程安全的可观察哈希索引
+            ConcurrentGateway gateway // 放大路径竞争并记录上传结果的 DSM 网关
     ) {
         // 创建始终返回同一启用配置的测试配置源
         SynologyConfigSource configSource = new SynologyConfigSource() {
@@ -156,6 +157,7 @@ public final class SynologyBackupRepositoryConcurrencyTest {
         );
     }
 
+    /** 记录并发备份中已由远端确认成功的线程安全原生哈希 */
     private static final class ConcurrentHashStore implements BackupHashStore {
         // 保存并发测试中已经完成远端确认的 ColorOS 原生哈希
         private final Set<String> hashes = ConcurrentHashMap.newKeySet();
@@ -169,8 +171,8 @@ public final class SynologyBackupRepositoryConcurrencyTest {
          */
         @Override
         public Set<String> findExisting(
-                SynologyConfig config,
-                Collection<String> candidates
+                SynologyConfig config, // 本测试使用的固定群晖配置
+                Collection<String> candidates // 待查询的 ColorOS 原生哈希集合
         ) {
             // 从候选哈希复制出不会修改调用方数据的结果集合
             Set<String> result = new LinkedHashSet<>(candidates);
@@ -190,6 +192,7 @@ public final class SynologyBackupRepositoryConcurrencyTest {
         }
     }
 
+    /** 放大同名路径决策竞争并模拟 DSM 原子写入行为 */
     private static final class ConcurrentGateway implements DsmBackupGateway {
         // 保存 DSM 完整路径与实际内容 MD5 的线程安全映射
         private final ConcurrentHashMap<String, String> remoteHashes = new ConcurrentHashMap<>();
@@ -237,6 +240,16 @@ public final class SynologyBackupRepositoryConcurrencyTest {
         }
 
         /**
+         * 接受固定并发测试会话的注销请求
+         *
+         * @param catalog 已发现的固定 DSM API 目录
+         * @param sid 固定测试会话标识
+         */
+        @Override
+        public void logout(DsmApiCatalog catalog, String sid) {
+        }
+
+        /**
          * 查询远端路径 MD5，并在首选路径放大未串行化决策的竞争窗口
          *
          * @param catalog 已发现的固定 DSM API 目录
@@ -247,9 +260,9 @@ public final class SynologyBackupRepositoryConcurrencyTest {
          */
         @Override
         public Optional<String> md5(
-                DsmApiCatalog catalog,
-                String sid,
-                String remotePath
+                DsmApiCatalog catalog, // 已发现的固定 DSM API 目录
+                String sid, // 固定测试会话标识
+                String remotePath // 仓储请求查询的 DSM 完整路径
         ) throws IOException {
             if (remotePath.endsWith("/IMG_1.jpg")) {
                 firstPrimaryQuery.countDown();
@@ -280,11 +293,11 @@ public final class SynologyBackupRepositoryConcurrencyTest {
          */
         @Override
         public long upload(
-                DsmApiCatalog catalog,
-                String sid,
-                BackupPath path,
-                long fileSize,
-                InputStream input
+                DsmApiCatalog catalog, // 已发现的固定 DSM API 目录
+                String sid, // 固定测试会话标识
+                BackupPath path, // 仓储选择的 DSM 上传路径
+                long fileSize, // ColorOS 报告的照片字节数
+                InputStream input // 仓储打开的照片输入流
         ) throws IOException {
             // 读取当前照片全部测试内容以生成远端 MD5
             byte[] content = input.readAllBytes();

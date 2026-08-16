@@ -75,23 +75,41 @@ internal enum class StatusTone {
  */
 @Composable
 internal fun NasConfigurationScreen(
+    // 当前 DSM 服务地址
     server: String,
+    // 当前 DSM 会话认证用户名
     username: String,
+    // 当前仅在受控配置链路传递的 DSM 密码
     password: String,
+    // 当前可为空的一次性验证码
     otp: String,
+    // 当前 ColorOS 相册浏览使用的 DSM 图片根目录
     remoteRoot: String,
+    // 当前照片备份开关
     backupEnabled: Boolean,
+    // 当前图片根目录下的固定备份文件夹名称
     backupFolder: String,
+    // 当前状态文案，为空时页面显示未连接状态
     statusMessage: String?,
+    // 当前状态卡片使用的语义色调
     statusTone: StatusTone,
+    // 是否正在验证、保存和发布配置
     busy: Boolean,
+    // 将 DSM 地址编辑结果传回 Activity 状态源的回调
     onServerChange: (String) -> Unit,
+    // 将 DSM 用户名编辑结果传回 Activity 状态源的回调
     onUsernameChange: (String) -> Unit,
+    // 将 DSM 密码编辑结果传回 Activity 状态源的回调
     onPasswordChange: (String) -> Unit,
+    // 将一次性验证码编辑结果传回 Activity 状态源的回调
     onOtpChange: (String) -> Unit,
+    // 将图片根目录编辑结果传回 Activity 状态源的回调
     onRemoteRootChange: (String) -> Unit,
+    // 将照片备份开关变化传回 Activity 状态源的回调
     onBackupEnabledChange: (Boolean) -> Unit,
+    // 将固定备份文件夹编辑结果传回 Activity 状态源的回调
     onBackupFolderChange: (String) -> Unit,
+    // 请求 Activity 执行保存并连接流程的回调
     onConnect: () -> Unit,
 ) {
     Scaffold(
@@ -147,7 +165,9 @@ internal fun NasConfigurationScreen(
  */
 @Composable
 private fun StatusCard(
+    // 需要在状态卡片中展示的当前状态文案
     message: String,
+    // 决定状态指示点颜色的有限语义色调
     tone: StatusTone,
 ) {
     // 将有限状态语义映射为唯一的视觉指示色
@@ -202,21 +222,37 @@ private fun StatusCard(
  */
 @Composable
 private fun ConfigurationCard(
+    // 当前 DSM 服务地址
     server: String,
+    // 当前 DSM 会话认证用户名
     username: String,
+    // 当前仅在受控配置链路传递的 DSM 密码
     password: String,
+    // 当前可为空的一次性验证码
     otp: String,
+    // 当前 ColorOS 相册浏览使用的 DSM 图片根目录
     remoteRoot: String,
+    // 当前照片备份开关
     backupEnabled: Boolean,
+    // 当前图片根目录下的固定备份文件夹名称
     backupFolder: String,
+    // 是否正在验证、保存和发布配置
     busy: Boolean,
+    // 将 DSM 地址编辑结果传回 Activity 状态源的回调
     onServerChange: (String) -> Unit,
+    // 将 DSM 用户名编辑结果传回 Activity 状态源的回调
     onUsernameChange: (String) -> Unit,
+    // 将 DSM 密码编辑结果传回 Activity 状态源的回调
     onPasswordChange: (String) -> Unit,
+    // 将一次性验证码编辑结果传回 Activity 状态源的回调
     onOtpChange: (String) -> Unit,
+    // 将图片根目录编辑结果传回 Activity 状态源的回调
     onRemoteRootChange: (String) -> Unit,
+    // 将照片备份开关变化传回 Activity 状态源的回调
     onBackupEnabledChange: (Boolean) -> Unit,
+    // 将固定备份文件夹编辑结果传回 Activity 状态源的回调
     onBackupFolderChange: (String) -> Unit,
+    // 请求 Activity 执行保存并连接流程的回调
     onConnect: () -> Unit,
 ) {
     // 用于在备份文件夹输入完成时收起输入焦点

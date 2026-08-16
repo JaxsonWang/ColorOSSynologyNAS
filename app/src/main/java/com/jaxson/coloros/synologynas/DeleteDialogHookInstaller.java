@@ -32,17 +32,10 @@ final class DeleteDialogHookInstaller {
     void install() {
         xposed.hook(targets.showMultiDeleteDialog()).intercept(
                 /* 多选删除确认框协程的 Hook 调用链 */ chain -> {
+                    // 从协程实例读取固定的多选删除请求参数
+                    Object params = targets.multiDeleteParams().get(chain.getThisObject());
                     // 保存当前多选删除请求对应的设备标识
-                    String deviceUserId;
-                    try {
-                        // 从协程实例读取固定的多选删除请求参数
-                        Object params = targets.multiDeleteParams().get(chain.getThisObject());
-                        deviceUserId = (String) targets.deleteParamsDeviceId().get(params);
-                    } catch (ReflectiveOperationException | RuntimeException
-                             /* 多选删除设备身份解析异常 */ error) {
-                        logError("multi-select delete dialog device lookup failed", error);
-                        return chain.proceed();
-                    }
+                    String deviceUserId = (String) targets.deleteParamsDeviceId().get(params);
                     return interceptDeleteDialog(chain, deviceUserId);
                 }
         );
@@ -50,14 +43,7 @@ final class DeleteDialogHookInstaller {
         xposed.hook(targets.showSingleDeleteDialog()).intercept(
                 /* 单图删除确认框协程的 Hook 调用链 */ chain -> {
                     // 保存当前单图删除请求对应的设备标识
-                    String deviceUserId;
-                    try {
-                        deviceUserId = resolveSingleDeleteDeviceId(chain.getThisObject());
-                    } catch (ReflectiveOperationException | RuntimeException
-                             /* 单图删除设备身份解析异常 */ error) {
-                        logError("single-photo delete dialog device lookup failed", error);
-                        return chain.proceed();
-                    }
+                    String deviceUserId = resolveSingleDeleteDeviceId(chain.getThisObject());
                     return interceptDeleteDialog(chain, deviceUserId);
                 }
         );
@@ -81,6 +67,7 @@ final class DeleteDialogHookInstaller {
      * @param dialogCoroutine 当前单图删除确认框协程实例
      * @return NAS 媒体对象中的设备标识；非目标媒体对象返回 null
      * @throws ReflectiveOperationException 任一固定字段或辅助方法调用失败时抛出
+     * @throws IllegalStateException NAS 媒体重载后仍缺少设备标识时抛出
      */
     private String resolveSingleDeleteDeviceId(Object dialogCoroutine)
             throws ReflectiveOperationException {
@@ -99,6 +86,10 @@ final class DeleteDialogHookInstaller {
             targets.loadNasMediaMetadata().invoke(mediaItem);
             deviceUserId = (String) targets.nasMediaDeviceId().get(mediaItem);
         }
+        // NAS 媒体已完成重载仍缺少身份时禁止继续进入无法判定设备的原删除路径
+        if (deviceUserId == null || deviceUserId.isEmpty()) {
+            throw new IllegalStateException("ColorOS NAS media device id is missing");
+        }
         return deviceUserId;
     }
 
@@ -111,8 +102,8 @@ final class DeleteDialogHookInstaller {
      * @throws Throwable 原删除协程抛出的异常保持原样传播
      */
     private Object interceptDeleteDialog(
-            XposedInterface.Chain chain,
-            String deviceUserId
+            XposedInterface.Chain chain, // 当前删除确认框协程的 Hook 调用链
+            String deviceUserId // 从当前请求恢复的 NAS 设备标识
     ) throws Throwable {
         if (!HookPolicy.shouldSuppressSynologyDeleteMessage(deviceUserId)) {
             return chain.proceed();
@@ -142,13 +133,4 @@ final class DeleteDialogHookInstaller {
         xposed.log(Log.INFO, ColorOsSynologyNasModule.TAG, message);
     }
 
-    /**
-     * 以统一模块标签记录删除弹窗错误日志
-     *
-     * @param message 描述失败阶段的信息
-     * @param error 需要保留堆栈的实际异常
-     */
-    private void logError(String message, Throwable error) {
-        xposed.log(Log.ERROR, ColorOsSynologyNasModule.TAG, message, error);
-    }
 }

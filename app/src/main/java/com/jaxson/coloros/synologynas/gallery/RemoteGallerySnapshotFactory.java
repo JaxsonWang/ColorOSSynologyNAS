@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+// 从 DSM 图片清单构造确定性相册和照片快照
 final class RemoteGallerySnapshotFactory {
     // ColorOS 使用固定相册标识 0 表达聚合全部远端照片的项目
     private static final String ALL_ALBUM_ID = "0";
@@ -169,6 +170,7 @@ final class RemoteGallerySnapshotFactory {
         long candidate = positiveLongDigest(value);
         // 当前候选值的十进制字符串形式
         String id = Long.toString(candidate);
+        // 逐一递增直至占用一个尚未分配的正 long 标识
         while (!used.add(id)) {
             candidate = candidate == Long.MAX_VALUE ? 1L : candidate + 1L;
             id = Long.toString(candidate);
@@ -183,6 +185,7 @@ final class RemoteGallerySnapshotFactory {
     ) {
         // 当前尝试分配的正 int 候选值
         int candidate = positiveIntDigest(value);
+        // 逐一递增直至占用一个尚未分配的正 int 标识
         while (!used.add(candidate)) {
             candidate = candidate == Integer.MAX_VALUE ? 1 : candidate + 1;
         }

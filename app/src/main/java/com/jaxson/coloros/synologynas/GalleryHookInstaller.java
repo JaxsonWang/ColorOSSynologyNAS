@@ -44,6 +44,8 @@ final class GalleryHookInstaller {
     private final GalleryBackupClient backupClient;
     // 保存全部 Hook 共享且唯一的群晖型号、连接和照片统计状态
     private final SynologyNasHookState hookState;
+    // 保存首个 Hook 注册前创建成功的群晖设备状态 Flow
+    private final Object nasStatusFlow;
 
     /**
      * 创建绑定到同一依赖组和完整私有目标集合的业务 Hook 安装器
@@ -57,18 +59,19 @@ final class GalleryHookInstaller {
      * @param statusClient 后台连接状态探测使用的独立 DSM 客户端
      * @param backupClient 相册原生备份入口使用的群晖客户端
      * @param hookState 全部 Hook 共享的唯一群晖运行状态
+     * @throws ReflectiveOperationException 相册状态 Flow 初值无法创建时抛出
      */
     GalleryHookInstaller(
-            XposedInterface xposed,
-            Context context,
-            ApplicationInfo moduleApplicationInfo,
-            ClassLoader classLoader,
-            HookTargets targets,
-            GalleryRemoteClient remoteClient,
-            GalleryRemoteClient statusClient,
-            GalleryBackupClient backupClient,
-            SynologyNasHookState hookState
-    ) {
+            XposedInterface xposed, // 提供 Hook 注册和模块日志的接口
+            Context context, // 相册 Application 实际绑定的 Context
+            ApplicationInfo moduleApplicationInfo, // 模块自身资源对应的应用信息
+            ClassLoader classLoader, // 解析相册私有类型的真实类加载器
+            HookTargets targets, // 已完整解析的相册私有成员集合
+            GalleryRemoteClient remoteClient, // 浏览和 Provider 请求使用的客户端
+            GalleryRemoteClient statusClient, // 后台状态探测专用客户端
+            GalleryBackupClient backupClient, // 相册原生备份请求使用的客户端
+            SynologyNasHookState hookState // 全部业务 Hook 共享的状态容器
+    ) throws ReflectiveOperationException {
         this.xposed = xposed;
         this.context = context;
         this.moduleApplicationInfo = moduleApplicationInfo;
@@ -78,6 +81,10 @@ final class GalleryHookInstaller {
         this.statusClient = statusClient;
         this.backupClient = backupClient;
         this.hookState = hookState;
+        this.nasStatusFlow = ColorOsGalleryBridge.mutableStatusFlow(
+                classLoader,
+                hookState.connected()
+        );
     }
 
     /**
@@ -108,27 +115,23 @@ final class GalleryHookInstaller {
 
     /**
      * 安装 Provider 替换、设备注入、统计读取、状态 Flow 与下载句柄 Hook
-     *
-     * @throws ReflectiveOperationException 相册状态 Flow 初值无法创建时抛出
      */
-    void installProviderHooks() throws ReflectiveOperationException {
-        // 创建群晖设备唯一的相册 MutableStateFlow，Hook 调用立即返回该实例
-        Object nasStatusFlow = ColorOsGalleryBridge.mutableStatusFlow(
-                classLoader,
-                hookState.connected()
-        );
+    void installProviderHooks() {
         xposed.hook(targets.cloudSyncProxyConstructor()).intercept(
                 /* CloudSyncProxyDM 构造完成后的 Hook 调用链 */ chain -> {
                     // 保留原构造器执行结果，并在实例初始化后替换 FEINIU Provider
                     Object result = chain.proceed();
-                    ColorOsGalleryBridge.replaceProvider(
+                    // 标记本次构造是否首次完成 FEINIU Provider 替换
+                    boolean replaced = ColorOsGalleryBridge.replaceProvider(
                             chain.getThisObject(),
                             classLoader,
                             remoteClient,
                             backupClient,
                             hookState::photoCount
                     );
-                    logInfo("replaced FEINIU provider with Synology DSM 7 provider");
+                    if (replaced) {
+                        logInfo("replaced FEINIU provider with Synology DSM 7 provider");
+                    }
                     return result;
                 }
         );
@@ -137,20 +140,19 @@ final class GalleryHookInstaller {
                 /* NAS 设备列表读取方法的 Hook 调用链 */ chain -> {
                     // 保存相册原方法返回的完整 NAS 设备列表
                     Object result = chain.proceed();
-                    if (!(result instanceof ArrayList<?>)) {
-                        return result;
-                    }
-                    // 将已确认类型的原列表传给群晖设备注入桥接层
+                    // 将安装前已确认类型的原列表传给群晖设备注入桥接层
                     ArrayList<?> devices = (ArrayList<?>) result;
                     if (!ColorOsGalleryBridge.isConfiguredManager(chain.getThisObject())) {
                         return result;
                     }
+                    // 一次读取当前群晖型号与连接状态，避免同一设备混用跨时点数据
+                    SynologyNasHookState.NasState nasState = hookState.snapshot();
                     // 保存保留其他设备且重新注入唯一群晖项的新列表
                     ArrayList<Object> devicesWithSynology = ColorOsGalleryBridge.withSynologyDevice(
                             devices,
                             classLoader,
-                            hookState.deviceModel(),
-                            hookState.connected()
+                            nasState.deviceModel(),
+                            nasState.connected()
                     );
                     logInfo("injected Synology DSM 7 device into ColorOS gallery");
                     return devicesWithSynology;
@@ -214,32 +216,22 @@ final class GalleryHookInstaller {
 
                     // 保存跳过连续群晖项后应继续处理的位置
                     int nextIndex;
-                    try {
-                        // 先确认当前位置确实属于群晖项，避免无意义读取私有 DAO
-                        int nextIndexIfStored = ColorOsGalleryBridge.nextPreloadIndex(
-                                devices,
-                                currentIndex,
-                                true
-                        );
-                        if (nextIndexIfStored == currentIndex) {
-                            return chain.proceed();
-                        }
-                        // 合并 Hook 已读统计与当前私有 DAO 查询结果
-                        boolean hasStoredMetadata = hookState.hasStoredMetadata()
-                                || hookState.readStoredMetadata(targets);
-                        nextIndex = ColorOsGalleryBridge.nextPreloadIndex(
-                                devices,
-                                currentIndex,
-                                hasStoredMetadata
-                        );
-                    } catch (ReflectiveOperationException | RuntimeException
-                             /* 群晖本地统计读取异常 */ error) {
-                        logError("stored Synology metadata lookup failed", error);
+                    // 先确认当前位置确实属于群晖项，避免无意义读取私有 DAO
+                    int nextIndexIfStored = ColorOsGalleryBridge.nextPreloadIndex(
+                            devices,
+                            currentIndex,
+                            true
+                    );
+                    if (nextIndexIfStored == currentIndex) {
                         return chain.proceed();
                     }
-                    if (nextIndex == currentIndex) {
+                    // 合并 Hook 已读统计与当前私有 DAO 查询结果
+                    boolean hasStoredMetadata = hookState.hasStoredMetadata()
+                            || hookState.readStoredMetadata(targets);
+                    if (!hasStoredMetadata) {
                         return chain.proceed();
                     }
+                    nextIndex = nextIndexIfStored;
 
                     logInfo("skipped Synology startup metadata preload; local photo count="
                             + hookState.photoCount());
@@ -337,36 +329,6 @@ final class GalleryHookInstaller {
     }
 
     /**
-     * 仅将相册原方法返回的飞牛品牌短文案和状态说明替换为群晖语义
-     */
-    void installLabelHook() {
-        xposed.hook(targets.resolveFolderNote()).intercept(
-                /* NAS 文件夹文案解析方法的 Hook 调用链 */ chain -> {
-                    // 保存相册原方法返回的文案对象
-                    Object result = chain.proceed();
-                    if (result instanceof String) {
-                        // 将确认类型后的原文案交给纯策略执行精确替换
-                        String value = (String) result;
-                        return HookPolicy.rewriteNasLabel(value);
-                    }
-                    return result;
-                }
-        );
-        xposed.hook(targets.resolveNasStateMessage()).intercept(
-                /* NAS 状态说明解析方法的 Hook 调用链 */ chain -> {
-                    // 保存相册原方法返回的状态说明对象
-                    Object result = chain.proceed();
-                    if (result instanceof String) {
-                        // 将确认类型后的原状态说明交给纯策略执行品牌替换
-                        String value = (String) result;
-                        return HookPolicy.rewriteNasStateMessage(value);
-                    }
-                    return result;
-                }
-        );
-    }
-
-    /**
      * 安装群晖卡片品牌样式和连接状态刷新 Hook
      */
     void installGalleryCardHooks() {
@@ -374,19 +336,16 @@ final class GalleryHookInstaller {
                 /* 私有云图集卡片绑定方法的 Hook 调用链 */ chain -> {
                     // 保存相册原卡片绑定方法的返回值
                     Object result = chain.proceed();
-                    try {
-                        ColorOsGalleryBridge.applySynologyCardBranding(
-                                context,
-                                moduleApplicationInfo,
-                                chain.getThisObject(),
-                                chain.getArg(2),
-                                hookState.deviceModel(),
-                                hookState.connected()
-                        );
-                    } catch (ReflectiveOperationException | RuntimeException
-                             /* 群晖卡片品牌资源或字段更新异常 */ error) {
-                        logError("Synology card branding failed", error);
-                    }
+                    // 一次读取当前群晖型号与连接状态，避免同一卡片混用跨时点数据
+                    SynologyNasHookState.NasState nasState = hookState.snapshot();
+                    ColorOsGalleryBridge.applySynologyCardBranding(
+                            context,
+                            moduleApplicationInfo,
+                            chain.getThisObject(),
+                            chain.getArg(2),
+                            nasState.deviceModel(),
+                            nasState.connected()
+                    );
                     return result;
                 }
         );
@@ -394,26 +353,21 @@ final class GalleryHookInstaller {
                 /* 私有云图集 availability 刷新方法的 Hook 调用链 */ chain -> {
                     // 保存相册原连接状态刷新方法的返回值
                     Object result = chain.proceed();
-                    try {
-                        // 从当前 binding 的固定字段读取实际设备，禁止其他 NAS 污染群晖状态
-                        String deviceUserId = (String) targets.nasBindingDeviceId()
-                                .get(chain.getThisObject());
-                        // 保存当前卡片 availability 回调携带的相册连接状态值
-                        Integer state = (Integer) chain.getArg(0);
-                        if (!hookState.updateConnectedFromAvailability(deviceUserId, state)) {
-                            return result;
-                        }
-                        // 读取刚由群晖卡片更新的唯一共享连接状态
-                        boolean connected = hookState.connected();
-                        ColorOsGalleryBridge.applySynologyConnectionLabel(
-                                chain.getThisObject(),
-                                hookState.deviceModel(),
-                                connected
-                        );
-                    } catch (ReflectiveOperationException | RuntimeException
-                             /* 群晖连接状态字段或标签更新异常 */ error) {
-                        logError("Synology connection label update failed", error);
+                    // 从当前 binding 的固定字段读取实际设备，禁止其他 NAS 污染群晖状态
+                    String deviceUserId = (String) targets.nasBindingDeviceId()
+                            .get(chain.getThisObject());
+                    // 保存当前卡片 availability 回调携带的相册连接状态值
+                    Integer state = (Integer) chain.getArg(0);
+                    if (!hookState.updateConnectedFromAvailability(deviceUserId, state)) {
+                        return result;
                     }
+                    // 一次读取刚由群晖卡片更新的型号与连接状态原子快照
+                    SynologyNasHookState.NasState nasState = hookState.snapshot();
+                    ColorOsGalleryBridge.applySynologyConnectionLabel(
+                            chain.getThisObject(),
+                            nasState.deviceModel(),
+                            nasState.connected()
+                    );
                     return result;
                 }
         );
@@ -428,13 +382,4 @@ final class GalleryHookInstaller {
         xposed.log(Log.INFO, ColorOsSynologyNasModule.TAG, message);
     }
 
-    /**
-     * 以统一模块标签记录业务 Hook 错误日志
-     *
-     * @param message 描述失败阶段的信息
-     * @param error 需要保留堆栈的实际异常
-     */
-    private void logError(String message, Throwable error) {
-        xposed.log(Log.ERROR, ColorOsSynologyNasModule.TAG, message, error);
-    }
 }

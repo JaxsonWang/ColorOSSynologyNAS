@@ -12,12 +12,14 @@ import com.jaxson.coloros.synologynas.SynologyConfigSource;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyStore;
+import java.util.Map;
 
 import javax.crypto.Cipher;
 import javax.crypto.KeyGenerator;
 import javax.crypto.SecretKey;
 import javax.crypto.spec.GCMParameterSpec;
 
+/** 使用 Android Keystore 加密保存模块 App 内的群晖敏感凭据 */
 public final class CredentialStore implements SynologyConfigSource {
     // 指定仅由模块 App 保存敏感群晖凭据的 SharedPreferences 文件
     private static final String PREFERENCES = "synology_credentials";
@@ -61,7 +63,9 @@ public final class CredentialStore implements SynologyConfigSource {
      *
      * @param context 用于打开应用私有 SharedPreferences 的上下文
      */
-    public CredentialStore(Context context) {
+    public CredentialStore(
+            Context context // 用于打开应用私有 SharedPreferences 的上下文
+    ) {
         this(context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE));
     }
 
@@ -70,7 +74,9 @@ public final class CredentialStore implements SynologyConfigSource {
      *
      * @param preferences 模块 App 私有的群晖凭据偏好存储
      */
-    CredentialStore(SharedPreferences preferences) {
+    CredentialStore(
+            SharedPreferences preferences // 模块 App 私有的群晖凭据偏好存储
+    ) {
         this.preferences = preferences;
     }
 
@@ -80,7 +86,9 @@ public final class CredentialStore implements SynologyConfigSource {
      * @param config 已完成业务校验的群晖配置
      * @throws GeneralSecurityException Keystore 或 AES-GCM 加密失败
      */
-    public void save(SynologyConfig config) throws GeneralSecurityException {
+    public void save(
+            SynologyConfig config // 已完成业务校验且需要加密保存的群晖配置
+    ) throws GeneralSecurityException {
         // 保存与密码字段名绑定附加数据后的 AES-GCM 密文
         String encryptedPassword = encrypt(KEY_PASSWORD, config.password());
         // 保存与 OTP 字段名绑定附加数据后的 AES-GCM 密文
@@ -104,10 +112,12 @@ public final class CredentialStore implements SynologyConfigSource {
     /** @return 模块私有存储是否同时包含当前 schema 的全部八个配置键 */
     @Override
     public boolean hasConfig() {
-        if (!hasAnyConfigKey()) {
+        // 保存本次完整性判断使用的唯一偏好快照
+        Map<String, ?> values = preferences.getAll();
+        if (!hasAnyConfigKey(values)) {
             return false;
         }
-        requireCompleteConfig();
+        requireCompleteConfig(values);
         return true;
     }
 
@@ -119,47 +129,69 @@ public final class CredentialStore implements SynologyConfigSource {
      */
     @Override
     public SynologyConfig load() throws GeneralSecurityException {
-        if (!hasAnyConfigKey()) {
+        // 保存本次配置恢复全程使用的唯一偏好快照
+        Map<String, ?> values = preferences.getAll();
+        if (!hasAnyConfigKey(values)) {
             return null;
         }
-        requireCompleteConfig();
+        requireCompleteConfig(values);
         return new SynologyConfig(
-                requiredString(KEY_SERVER),
-                requiredString(KEY_USERNAME),
-                decrypt(KEY_PASSWORD, requiredString(KEY_PASSWORD)),
-                decrypt(KEY_OTP, requiredString(KEY_OTP)),
-                requiredString(KEY_REMOTE_ROOT),
-                requiredString(KEY_DEVICE_MODEL),
-                requiredBoolean(KEY_BACKUP_ENABLED),
-                requiredString(KEY_BACKUP_FOLDER)
+                requiredString(values, KEY_SERVER),
+                requiredString(values, KEY_USERNAME),
+                decrypt(KEY_PASSWORD, requiredString(values, KEY_PASSWORD)),
+                decrypt(KEY_OTP, requiredString(values, KEY_OTP)),
+                requiredString(values, KEY_REMOTE_ROOT),
+                requiredString(values, KEY_DEVICE_MODEL),
+                requiredBoolean(values, KEY_BACKUP_ENABLED),
+                requiredString(values, KEY_BACKUP_FOLDER)
         );
     }
 
-    /** @return 当前凭据存储是否包含至少一个配置 schema 键 */
-    private boolean hasAnyConfigKey() {
+    /**
+     * 判断单次偏好快照是否包含至少一个配置 schema 键
+     *
+     * @param values 本次操作固定使用的完整偏好快照
+     * @return 任一当前配置键存在时为 true
+     */
+    private static boolean hasAnyConfigKey(
+            Map<String, ?> values // 本次操作固定使用的完整偏好快照
+    ) {
         // 逐一检查当前 schema 键以区分从未配置与配置损坏
-        for (String key : REQUIRED_CONFIG_KEYS) {
-            if (preferences.contains(key)) {
+        for (String /* 当前检查是否存在的配置 schema 键 */ key : REQUIRED_CONFIG_KEYS) {
+            if (values.containsKey(key)) {
                 return true;
             }
         }
         return false;
     }
 
-    /** @return 当前凭据存储是否完整包含全部配置 schema 键 */
-    private boolean hasAllConfigKeys() {
+    /**
+     * 判断单次偏好快照是否完整包含全部配置 schema 键
+     *
+     * @param values 本次操作固定使用的完整偏好快照
+     * @return 全部当前配置键均存在时为 true
+     */
+    private static boolean hasAllConfigKeys(
+            Map<String, ?> values // 本次操作固定使用的完整偏好快照
+    ) {
         // 逐一检查当前 schema 键，任一缺失都不视为可用配置
-        for (String key : REQUIRED_CONFIG_KEYS) {
-            if (!preferences.contains(key)) {
+        for (String /* 当前检查是否完整存在的配置 schema 键 */ key : REQUIRED_CONFIG_KEYS) {
+            if (!values.containsKey(key)) {
                 return false;
             }
         }
         return true;
     }
 
-    /** 要求当前凭据存储完整包含全部配置 schema 键 */
-    private void requireCompleteConfig() {
-        if (!hasAllConfigKeys()) {
+    /**
+     * 要求单次偏好快照完整包含全部配置 schema 键
+     *
+     * @param values 本次操作固定使用的完整偏好快照
+     */
+    private static void requireCompleteConfig(
+            Map<String, ?> values // 本次操作固定使用的完整偏好快照
+    ) {
+        if (!hasAllConfigKeys(values)) {
             throw new IllegalStateException("群晖配置字段不完整");
         }
     }
@@ -170,13 +202,16 @@ public final class CredentialStore implements SynologyConfigSource {
      * @param key 待读取的 SharedPreferences 字段名
      * @return 已保存的字符串值，允许业务字段保存空字符串
      */
-    private String requiredString(String key) {
-        // 以 null 作为字段类型或存储值异常的明确判定值
-        String value = preferences.getString(key, null);
-        if (value == null) {
+    private static String requiredString(
+            Map<String, ?> values, // 本次操作固定使用的完整偏好快照
+            String key // 待读取且必须保存为字符串的 SharedPreferences 字段名
+    ) {
+        // 从固定快照读取实际值，避免跨提交组合不同版本字段
+        Object value = values.get(key);
+        if (!(value instanceof String)) {
             throw new IllegalStateException("群晖配置字段无效: " + key);
         }
-        return value;
+        return (String) value;
     }
 
     /**
@@ -185,9 +220,12 @@ public final class CredentialStore implements SynologyConfigSource {
      * @param key 待读取的 SharedPreferences 字段名
      * @return 已保存的布尔值
      */
-    private boolean requiredBoolean(String key) {
-        // 从完整偏好映射读取实际类型，避免 getBoolean 默认值掩盖缺失或类型错误
-        Object value = preferences.getAll().get(key);
+    private static boolean requiredBoolean(
+            Map<String, ?> values, // 本次操作固定使用的完整偏好快照
+            String key // 待读取且必须保存为布尔值的 SharedPreferences 字段名
+    ) {
+        // 从固定快照读取实际类型，避免布尔默认值掩盖类型错误
+        Object value = values.get(key);
         if (!(value instanceof Boolean)) {
             throw new IllegalStateException("群晖配置字段无效: " + key);
         }
@@ -202,7 +240,10 @@ public final class CredentialStore implements SynologyConfigSource {
      * @return 包含版本、IV 和密文的可持久化文本
      * @throws GeneralSecurityException Keystore 或 AES-GCM 加密失败
      */
-    private String encrypt(String field, String plaintext) throws GeneralSecurityException {
+    private String encrypt(
+            String field, // 作为 GCM 附加数据绑定密文用途的配置字段名
+            String plaintext // 待加密且只在当前调用栈使用的敏感字段明文
+    ) throws GeneralSecurityException {
         // 创建固定 AES-GCM 转换的单次加密器实例
         Cipher cipher = Cipher.getInstance(TRANSFORMATION);
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey());
@@ -223,16 +264,29 @@ public final class CredentialStore implements SynologyConfigSource {
      * @return UTF-8 编码的敏感字段明文
      * @throws GeneralSecurityException 密文格式、Keystore 或 GCM 认证失败
      */
-    private String decrypt(String field, String encoded) throws GeneralSecurityException {
+    private String decrypt(
+            String field, // 作为 GCM 附加数据校验密文用途的配置字段名
+            String encoded // 包含版本、IV 和密文的持久化文本
+    ) throws GeneralSecurityException {
         // 拆分固定的版本、IV 和密文三段格式
         String[] parts = encoded.split(":", -1);
         if (parts.length != 3 || !"v1".equals(parts[0])) {
             throw new GeneralSecurityException("不支持的凭据密文格式");
         }
         // 解码创建该密文时由 GCM 随机生成的 IV
-        byte[] iv = Base64.decode(parts[1], Base64.NO_WRAP);
+        byte[] iv;
+        try {
+            iv = Base64.decode(parts[1], Base64.NO_WRAP);
+        } catch (IllegalArgumentException /* IV 文本不是合法 Base64 */ error) {
+            throw new GeneralSecurityException("凭据 IV 编码无效", error);
+        }
         // 解码包含 GCM 认证标签的密文字节
-        byte[] ciphertext = Base64.decode(parts[2], Base64.NO_WRAP);
+        byte[] ciphertext;
+        try {
+            ciphertext = Base64.decode(parts[2], Base64.NO_WRAP);
+        } catch (IllegalArgumentException /* 密文不是合法 Base64 */ error) {
+            throw new GeneralSecurityException("凭据密文编码无效", error);
+        }
         // 创建固定 AES-GCM 转换的单次解密器实例
         Cipher cipher = Cipher.getInstance(TRANSFORMATION);
         cipher.init(Cipher.DECRYPT_MODE, getOrCreateKey(), new GCMParameterSpec(128, iv));

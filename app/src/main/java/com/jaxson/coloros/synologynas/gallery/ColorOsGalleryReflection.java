@@ -1,8 +1,11 @@
 package com.jaxson.coloros.synologynas.gallery;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
+// 集中执行 ColorOS 相册当前 DEX 固定字段反射
 final class ColorOsGalleryReflection {
     // 禁止实例化只承载 ColorOS 相册固定反射操作的工具类
     private ColorOsGalleryReflection() {
@@ -43,36 +46,47 @@ final class ColorOsGalleryReflection {
         return integer;
     }
 
-    // 在当前类固定字段集合中读取指定私有类型的非空实例
-    static Object readFieldByType(
+    // 从当前类读取字段名和声明类型均与 DEX 合同一致的非空实例
+    static Object readTypedField(
             Object owner, // 持有目标 ColorOS 私有组件的对象
+            String name, // 当前版本确认的混淆字段名
             String className // 当前版本确认的字段类型完整类名
     ) throws ReflectiveOperationException {
-        for (Field field : owner.getClass().getDeclaredFields()) { // 当前候选实例字段
-            if (field.getType().getName().equals(className)) {
-                field.setAccessible(true);
-                // 候选字段在当前对象上的实际值
-                Object value = field.get(owner);
-                if (value != null) {
-                    return value;
-                }
-            }
+        // 当前类型中与 DEX 字段名精确匹配的声明
+        Field field = owner.getClass().getDeclaredField(name);
+        if (Modifier.isStatic(field.getModifiers())
+                || !field.getType().getName().equals(className)) {
+            throw new NoSuchFieldException(
+                    owner.getClass().getName() + "." + name + ":" + className
+            );
         }
-        throw new NoSuchFieldException(
-                owner.getClass().getName() + " field of type " + className
-        );
+        field.setAccessible(true);
+        // 精确目标字段在当前对象上的实际值
+        Object value = field.get(owner);
+        if (value == null) {
+            throw new IllegalStateException(
+                    owner.getClass().getName() + "." + name + " is null"
+            );
+        }
+        return value;
     }
 
     @SuppressWarnings("unchecked")
-    // 从当前 xhb 注册表唯一 Map 字段取得 Provider 映射
+    // 从当前 xhb.a 精确 ConcurrentHashMap 字段取得 Provider 映射
     static Map<Object, Object> registryMap(Object registry /* ColorOS xhb 注册表对象 */)
             throws ReflectiveOperationException {
-        for (Field field : registry.getClass().getDeclaredFields()) { // 注册表候选字段
-            if (Map.class.isAssignableFrom(field.getType())) {
-                field.setAccessible(true);
-                return (Map<Object, Object>) field.get(registry);
-            }
+        // xhb.a 对应当前运行时 DEX 的 Provider 注册表字段
+        Field field = registry.getClass().getDeclaredField("a");
+        if (Modifier.isStatic(field.getModifiers())
+                || field.getType() != ConcurrentHashMap.class) {
+            throw new NoSuchFieldException("ColorOS NAS registry xhb.a");
         }
-        throw new NoSuchFieldException("ColorOS NAS registry map");
+        field.setAccessible(true);
+        // 精确注册表字段保存的 Provider 映射
+        Object value = field.get(registry);
+        if (!(value instanceof ConcurrentHashMap<?, ?>)) {
+            throw new IllegalStateException("ColorOS NAS registry xhb.a is null");
+        }
+        return (Map<Object, Object>) value;
     }
 }

@@ -92,10 +92,10 @@ final class DsmUploadBody {
      * @param value 表单字段值
      */
     private static void appendPart(
-            StringBuilder body,
-            String boundary,
-            String name,
-            String value
+            /* body 是正在构造的 multipart 头部 */ StringBuilder body,
+            /* boundary 是当前上传边界 */ String boundary,
+            /* name 是表单字段名 */ String name,
+            /* value 是表单字段值 */ String value
     ) {
         body.append("--").append(boundary).append("\r\n")
                 .append("Content-Disposition: form-data; name=\"")

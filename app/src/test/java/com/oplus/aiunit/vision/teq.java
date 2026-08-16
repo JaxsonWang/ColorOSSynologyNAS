@@ -4,7 +4,9 @@ import com.oplus.gallery.framework.abilities.cloudsync.nas.api.model.NasBackupUp
 
 import java.util.ArrayList;
 
+// 模拟 ColorOS 备份上传结果的封闭类型层级
 public abstract class teq {
+    // 模拟 ColorOS 备份上传失败结果的数据合同
     public static final class a extends teq {
         // 模拟 teq.a 的 ColorOS 上传错误码字段
         public final NasBackupUploadErrorCode a;
@@ -25,6 +27,7 @@ public abstract class teq {
         }
     }
 
+    // 模拟 ColorOS 备份上传成功结果的数据合同
     public static final class b extends teq {
         // 模拟 teq.b 的备份目标路径字段
         public final ycq a;

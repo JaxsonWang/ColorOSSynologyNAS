@@ -8,6 +8,7 @@ import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.io.BufferedOutputStream;
+import java.io.Closeable;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -61,29 +62,14 @@ public final class DsmClient implements DsmGateway {
         DsmApiCatalog catalog = discoverApis();
         // sid 仅存在于当前调用栈，并在 finally 中注销
         String sid = login(catalog);
-        // primaryFailure 用于在主体失败时保留注销异常而不覆盖根因
-        Throwable primaryFailure = null;
-        try {
-            catalog.require("SYNO.FileStation.Download");
-            catalog.require("SYNO.FileStation.Thumb");
-            DsmDeleteOperation.requireApi(catalog);
+        // sessionLogout 通过 try-with-resources 保证注销并自动保留主体失败原因
+        Closeable sessionLogout = () -> logout(catalog, sid);
+        try (sessionLogout) {
+            requireTestConnectionApis(catalog, config.backupEnabled());
             // deviceModel 是连接成功后发布给相册卡片的真实型号
             String deviceModel = getDeviceModel(catalog, sid);
             mediaListing.verifyFolder(catalog, sid, config.remoteRoot());
             return deviceModel;
-        } catch (/* 主体失败必须原样继续抛出 */ IOException | RuntimeException | Error error) {
-            primaryFailure = error;
-            throw error;
-        } finally {
-            try {
-                logout(catalog, sid);
-            } catch (/* 注销失败不能覆盖已有主体失败 */ IOException logoutError) {
-                if (primaryFailure != null) {
-                    primaryFailure.addSuppressed(logoutError);
-                } else {
-                    throw logoutError;
-                }
-            }
         }
     }
 
@@ -95,14 +81,12 @@ public final class DsmClient implements DsmGateway {
      */
     @Override
     public DsmApiCatalog discoverApis() throws IOException {
-        // parameters 明确列出浏览链路需要发现的全部 API
+        // parameters 明确列出当前配置需要发现的全部 API
         Map<String, String> parameters = DsmParameters.of(
                 "api", "SYNO.API.Info",
                 "version", "1",
                 "method", "query",
-                "query", "SYNO.API.Auth,SYNO.FileStation.List,"
-                        + "SYNO.FileStation.Download,SYNO.FileStation.Thumb,"
-                        + "SYNO.FileStation.Delete,SYNO.Core.System"
+                "query", discoveryQuery(config.backupEnabled())
         );
         // url 指向 DSM 固定的 API 发现入口，后续业务路径均来自响应
         String url = DsmUrlBuilder.build(config.serverUrl(), "query.cgi", parameters);
@@ -119,7 +103,9 @@ public final class DsmClient implements DsmGateway {
      * @throws IOException 登录请求、业务错误或响应格式失败
      */
     @Override
-    public String login(DsmApiCatalog catalog) throws IOException {
+    public String login(
+            /* catalog 是 DSM 动态发现的 API 目录 */ DsmApiCatalog catalog
+    ) throws IOException {
         // auth 是动态发现的认证 API 描述
         DsmApiInfo auth = catalog.require("SYNO.API.Auth");
         // parameters 完整表达 DSM SID 登录合同
@@ -144,16 +130,7 @@ public final class DsmClient implements DsmGateway {
                 DsmUrlBuilder.encodeParameters(parameters)
         );
         DsmHttpTransport.requireSuccess(auth.name(), response);
-        try {
-            // sid 是规范化前的 DSM 登录会话标识
-            String sid = response.getJSONObject("data").getString("sid");
-            if (sid.isBlank()) {
-                throw new DsmException("DSM 登录成功响应缺少 SID");
-            }
-            return sid;
-        } catch (/* 登录 data 或 sid 字段格式错误 */ JSONException error) {
-            throw new DsmException("DSM 登录响应格式错误", error);
-        }
+        return DsmHttpTransport.parseSid(response);
     }
 
     /**
@@ -165,7 +142,10 @@ public final class DsmClient implements DsmGateway {
      * @throws IOException 请求、业务错误或响应格式失败
      */
     @Override
-    public String getDeviceModel(DsmApiCatalog catalog, String sid) throws IOException {
+    public String getDeviceModel(
+            /* catalog 是 DSM 动态发现的 API 目录 */ DsmApiCatalog catalog,
+            /* sid 是当前内存会话标识 */ String sid
+    ) throws IOException {
         // systemApi 是动态发现的系统信息 API
         DsmApiInfo systemApi = catalog.require("SYNO.Core.System");
         // parameters 表达系统信息查询合同
@@ -179,7 +159,6 @@ public final class DsmClient implements DsmGateway {
         String url = DsmUrlBuilder.build(config.serverUrl(), systemApi.path(), parameters);
         // response 是 DSM 系统信息响应
         JSONObject response = DsmHttpTransport.executeJson("GET", url, null);
-        DsmHttpTransport.requireSuccess(systemApi.name(), response);
         return parseDeviceModel(response);
     }
 
@@ -192,14 +171,22 @@ public final class DsmClient implements DsmGateway {
      */
     static String parseDeviceModel(JSONObject response) throws DsmException {
         DsmHttpTransport.requireSuccess("SYNO.Core.System", response);
-        // data 是系统信息响应的数据对象
-        JSONObject data = response.optJSONObject("data");
-        // model 是规范化后的 NAS 型号
-        String model = data == null ? "" : data.optString("model", "").trim();
-        if (model.isEmpty()) {
-            throw new DsmException("SYNO.Core.System 响应缺少 NAS 型号");
+        try {
+            if (!response.getJSONObject("data").has("model")) {
+                throw new DsmException("SYNO.Core.System 响应缺少 NAS 型号");
+            }
+            // model 是严格读取并规范化后的 NAS 型号
+            String model = DsmHttpTransport.requiredString(
+                    response.getJSONObject("data"),
+                    "model"
+            ).trim();
+            if (model.isEmpty()) {
+                throw new DsmException("SYNO.Core.System 响应缺少 NAS 型号");
+            }
+            return model;
+        } catch (/* 系统信息 data 或 model 字段格式错误 */ JSONException error) {
+            throw new DsmException("SYNO.Core.System 响应格式错误", error);
         }
-        return model;
     }
 
     /**
@@ -209,17 +196,15 @@ public final class DsmClient implements DsmGateway {
      * @param sid 待注销的内存会话标识
      * @throws IOException 注销请求或 DSM 业务失败
      */
-    public void logout(DsmApiCatalog catalog, String sid) throws IOException {
+    @Override
+    public void logout(
+            /* catalog 是 DSM 动态发现的 API 目录 */ DsmApiCatalog catalog,
+            /* sid 是待注销的内存会话标识 */ String sid
+    ) throws IOException {
         // auth 是动态发现的认证 API 描述
         DsmApiInfo auth = catalog.require("SYNO.API.Auth");
         // parameters 完整表达指定会话的注销合同
-        Map<String, String> parameters = DsmParameters.of(
-                "api", auth.name(),
-                "version", Integer.toString(auth.maxVersion()),
-                "method", "logout",
-                "session", SESSION_NAME,
-                "_sid", sid
-        );
+        Map<String, String> parameters = logoutParameters(auth, sid);
         // url 使用发现的认证路径，注销参数保留在表单体
         String url = DsmUrlBuilder.build(config.serverUrl(), auth.path(), Map.of());
         // response 是 DSM 注销响应
@@ -232,6 +217,23 @@ public final class DsmClient implements DsmGateway {
     }
 
     /**
+     * 构建两个 DSM 客户端共享的 Auth logout 表单参数
+     *
+     * @param auth 动态发现的认证 API 描述
+     * @param sid 待注销的内存会话标识
+     * @return 保持协议顺序且不含凭据的注销参数
+     */
+    static Map<String, String> logoutParameters(DsmApiInfo auth, String sid) {
+        return DsmParameters.of(
+                "api", auth.name(),
+                "version", Integer.toString(auth.maxVersion()),
+                "method", "logout",
+                "session", SESSION_NAME,
+                "_sid", sid
+        );
+    }
+
+    /**
      * 遍历配置根目录并返回所有远端图片
      *
      * @param catalog DSM 动态发现的 API 目录
@@ -240,7 +242,10 @@ public final class DsmClient implements DsmGateway {
      * @throws IOException DSM 列表请求或解析失败
      */
     @Override
-    public List<RemoteMedia> listImages(DsmApiCatalog catalog, String sid) throws IOException {
+    public List<RemoteMedia> listImages(
+            /* catalog 是 DSM 动态发现的 API 目录 */ DsmApiCatalog catalog,
+            /* sid 是当前内存会话标识 */ String sid
+    ) throws IOException {
         return mediaListing.listImages(catalog, sid);
     }
 
@@ -255,10 +260,10 @@ public final class DsmClient implements DsmGateway {
      */
     @Override
     public void download(
-            DsmApiCatalog catalog,
-            String sid,
-            RemoteMedia media,
-            OutputStream output
+            /* catalog 是 DSM 动态发现的 API 目录 */ DsmApiCatalog catalog,
+            /* sid 是当前内存会话标识 */ String sid,
+            /* media 是待读取的远端图片 */ RemoteMedia media,
+            /* output 是 ColorOS 调用链提供的目标输出流 */ OutputStream output
     ) throws IOException {
         // downloadApi 是动态发现的原图下载 API
         DsmApiInfo downloadApi = catalog.require("SYNO.FileStation.Download");
@@ -288,11 +293,11 @@ public final class DsmClient implements DsmGateway {
      */
     @Override
     public void downloadThumbnail(
-            DsmApiCatalog catalog,
-            String sid,
-            RemoteMedia media,
-            String size,
-            OutputStream output
+            /* catalog 是 DSM 动态发现的 API 目录 */ DsmApiCatalog catalog,
+            /* sid 是当前内存会话标识 */ String sid,
+            /* media 是待读取缩略图的远端图片 */ RemoteMedia media,
+            /* size 是 ColorOS 请求的缩略图尺寸 */ String size,
+            /* output 是 ColorOS 调用链提供的目标输出流 */ OutputStream output
     ) throws IOException {
         if (!"small".equals(size) && !"large".equals(size)) {
             throw new IllegalArgumentException("不支持的缩略图尺寸: " + size);
@@ -350,11 +355,11 @@ public final class DsmClient implements DsmGateway {
      * @throws IOException 下载或本地编码失败
      */
     private void generateLocalThumbnail(
-            DsmApiCatalog catalog,
-            String sid,
-            RemoteMedia media,
-            String size,
-            OutputStream output
+            /* catalog 是 DSM 动态发现的 API 目录 */ DsmApiCatalog catalog,
+            /* sid 是当前内存会话标识 */ String sid,
+            /* media 是待处理的远端图片 */ RemoteMedia media,
+            /* size 是 ColorOS 请求的缩略图尺寸 */ String size,
+            /* output 是 ColorOS 调用链提供的目标输出流 */ OutputStream output
     ) throws IOException {
         // extension 用于不暴露远端路径的诊断日志
         String extension = extensionOf(media.name());
@@ -367,15 +372,6 @@ public final class DsmClient implements DsmGateway {
                 download(catalog, sid, media, fileOutput);
             }
             LocalThumbnailGenerator.generate(source, localThumbnailMaxDimension(size), output);
-        } catch (/* 下载或本地解码失败必须原样继续抛出 */ IOException | RuntimeException error) {
-            Log.e(
-                    TAG,
-                    "DSM local thumbnail failed: extension=" + extension
-                            + ", size=" + size
-                            + ", error=" + error.getClass().getSimpleName()
-                            + ": " + String.valueOf(error.getMessage())
-            );
-            throw error;
         } finally {
             if (!source.delete() && source.exists()) {
                 Log.w(TAG, "DSM local thumbnail temporary file cleanup failed");
@@ -392,8 +388,11 @@ public final class DsmClient implements DsmGateway {
      * @throws IOException 删除请求或任务等待失败
      */
     @Override
-    public void delete(DsmApiCatalog catalog, String sid, List<RemoteMedia> media)
-            throws IOException {
+    public void delete(
+            /* catalog 是 DSM 动态发现的 API 目录 */ DsmApiCatalog catalog,
+            /* sid 是当前内存会话标识 */ String sid,
+            /* media 是待删除的远端图片 */ List<RemoteMedia> media
+    ) throws IOException {
         deleteOperation.delete(catalog, sid, media);
     }
 
@@ -417,6 +416,45 @@ public final class DsmClient implements DsmGateway {
      */
     static boolean parseDeleteFinished(JSONObject response) throws DsmException {
         return DsmDeleteOperation.parseFinished(response);
+    }
+
+    /**
+     * 构建当前连接配置需要动态发现的 API 名称列表
+     *
+     * @param backupEnabled 当前是否开启照片备份
+     * @return 逗号分隔的 SYNO.API.Info 查询值
+     */
+    static String discoveryQuery(boolean backupEnabled) {
+        // query 是浏览、删除和系统信息链路必需的 API 名称
+        String query = "SYNO.API.Auth,SYNO.FileStation.List,"
+                + "SYNO.FileStation.Download,SYNO.FileStation.Thumb,"
+                + "SYNO.FileStation.Delete,SYNO.Core.System";
+        if (!backupEnabled) {
+            return query;
+        }
+        return query + ",SYNO.FileStation.Upload,SYNO.FileStation.MD5";
+    }
+
+    /**
+     * 校验保存并连接链路需要的浏览 API 与可选备份 API
+     *
+     * @param catalog 当前连接动态发现的 API 目录
+     * @param backupEnabled 当前是否开启照片备份
+     * @throws DsmException 必需 API 缺失或备份 API 不支持 v2
+     */
+    static void requireTestConnectionApis(
+            /* catalog 是当前连接动态发现的 API 目录 */ DsmApiCatalog catalog,
+            /* backupEnabled 表示当前是否开启照片备份 */ boolean backupEnabled
+    ) throws DsmException {
+        DsmMediaListing.requireApi(catalog);
+        catalog.require("SYNO.FileStation.Download");
+        catalog.require("SYNO.FileStation.Thumb");
+        DsmDeleteOperation.requireApi(catalog);
+        if (!backupEnabled) {
+            return;
+        }
+        DsmBackupClient.requireVersion(catalog.require("SYNO.FileStation.Upload"));
+        DsmBackupClient.requireVersion(catalog.require("SYNO.FileStation.MD5"));
     }
 
     /**

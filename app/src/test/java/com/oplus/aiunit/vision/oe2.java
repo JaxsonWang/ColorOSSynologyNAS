@@ -1,5 +1,6 @@
 package com.oplus.aiunit.vision;
 
+// 模拟 ColorOS 首页分组的泛型基础数据合同
 public class oe2<T> {
     // 模拟 ColorOS 首页分组类型字段
     public final int a;

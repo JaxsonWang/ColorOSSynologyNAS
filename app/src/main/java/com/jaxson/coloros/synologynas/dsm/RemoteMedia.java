@@ -6,9 +6,9 @@ public final class RemoteMedia {
     private final String remotePath;
     /** 远端文件名 */
     private final String name;
-    /** 远端文件字节数；DSM 缺失时为 -1 */
+    /** DSM 列表响应明确返回的远端文件字节数 */
     private final long size;
-    /** 远端修改时间秒值；DSM 缺失时为 0 */
+    /** DSM 列表响应明确返回的远端修改时间秒值 */
     private final long modifiedSeconds;
     /** 按扩展名推导的图片 MIME 类型 */
     private final String mimeType;
@@ -23,11 +23,11 @@ public final class RemoteMedia {
      * @param mimeType 图片 MIME 类型
      */
     public RemoteMedia(
-            String remotePath,
-            String name,
-            long size,
-            long modifiedSeconds,
-            String mimeType
+            /* remotePath 是 DSM 完整远端路径 */ String remotePath,
+            /* name 是远端文件名 */ String name,
+            /* size 是文件字节数 */ long size,
+            /* modifiedSeconds 是修改时间秒值 */ long modifiedSeconds,
+            /* mimeType 是图片 MIME 类型 */ String mimeType
     ) {
         this.remotePath = remotePath;
         this.name = name;

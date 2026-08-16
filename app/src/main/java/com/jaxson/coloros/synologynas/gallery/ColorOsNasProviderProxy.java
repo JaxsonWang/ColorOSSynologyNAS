@@ -10,6 +10,7 @@ import java.lang.reflect.Proxy;
 import java.util.List;
 import java.util.function.IntSupplier;
 
+// 在 FEINIU 槽位按设备标识分流群晖和原 Provider 请求
 public final class ColorOsNasProviderProxy implements InvocationHandler {
     // 标识日志所属模块，便于从相册进程日志中筛选群晖调用
     private static final String TAG = "ColorOSSynologyNAS";
@@ -139,9 +140,14 @@ public final class ColorOsNasProviderProxy implements InvocationHandler {
                     NAS_AVAILABILITY,
                     client.isConfigured() ? "AVAILABLE" : "UNKNOWN"
             );
-            case "g" -> 0L;
-            case "h" -> null;
+            case "g" -> throw new UnsupportedOperationException(
+                    "Synology image provider does not expose video size"
+            );
+            case "h" -> throw new UnsupportedOperationException(
+                    "Synology provider does not expose a Feiniu app installation URL"
+            );
             case "i" -> backupResultMapper.hashResult((List<String>) args[1]);
+            // 群晖 HTTP 会话按请求延迟创建，不参与飞牛设备连接状态机
             case "j", "q", "u" -> null;
             case "k", "r" -> backupResultMapper.upload(args[0]);
             case "l" -> listAlbums((Integer) args[0], (Integer) args[1]);
@@ -158,10 +164,14 @@ public final class ColorOsNasProviderProxy implements InvocationHandler {
                     (Integer) args[0],
                     (Integer) args[1]
             );
-            case "v" -> new byte[0];
+            case "v" -> throw new UnsupportedOperationException(
+                    "Synology image provider does not expose video byte ranges"
+            );
             case "w" -> download((String) args[1], args[2]);
             case "x" -> thumbnail((String) args[1], args[2]);
-            default -> invokeOriginal(method, args);
+            default -> throw new IllegalStateException(
+                    "Unsupported ColorOS dpk method: " + name
+            );
         };
     }
 
@@ -199,7 +209,11 @@ public final class ColorOsNasProviderProxy implements InvocationHandler {
         // 指向设备标识在当前方法参数列表中的固定位置
         int deviceIndex = switch (methodName) {
             case "l", "t" -> 2;
-            default -> 0;
+            case "a", "d", "e", "g", "h", "i", "j", "m", "n", "o", "p", "q",
+                    "s", "u", "v", "w", "x" -> 0;
+            default -> throw new IllegalStateException(
+                    "Unsupported ColorOS dpk routing method: " + methodName
+            );
         };
         return args.length > deviceIndex
                 && GalleryContract.DEVICE_ID.equals(args[deviceIndex]);
@@ -213,7 +227,7 @@ public final class ColorOsNasProviderProxy implements InvocationHandler {
         try {
             return interfaceMethod.invoke(original, args);
         } catch (InvocationTargetException error /* 原 Provider 包装的真实调用异常 */) {
-            throw error.getCause() == null ? error : error.getCause();
+            throw error.getCause();
         }
     }
 
@@ -280,7 +294,7 @@ public final class ColorOsNasProviderProxy implements InvocationHandler {
                     "DSM delete photos failed: "
                             + error.getClass().getSimpleName()
                             + ": "
-                            + ColorOsNasReflection.errorMessage(error),
+                            + error.getMessage(),
                     error
             );
             return false;

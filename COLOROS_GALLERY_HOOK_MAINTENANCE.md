@@ -127,8 +127,9 @@ MainActivity
   └─ DsmClient.testConnection()
        ├─ 验证 DSM 登录与 File Station API
        └─ 获取真实 NAS 型号
-            └─ CredentialStore 保存凭据、备份开关和固定备份文件夹
-                 └─ SynologyApplication.publishConfig()
+            └─ SynologyApplication.saveAndPublishConfig()
+                 ├─ CredentialStore.save()
+                 └─ publishRemoteConfig()
                       └─ libxposed RemotePreferences
                            └─ 相册进程 RemoteConfigStore
 ```
@@ -137,8 +138,17 @@ MainActivity
 DSM。`SynologyApplication` 在服务绑定时只发布已有配置，不补发 DSM 网络请求。这一约束直接
 关系到相册首次进入和“图集”页签响应速度，也避免服务绑定刷新与用户保存配置发生竞争。
 
+`onServiceBind()`、`onServiceDied()` 和 `saveAndPublishConfig()` 都在同一个
+`SynologyApplication` 实例监视器上同步执行，服务绑定、死亡通知与用户保存不会交错。
+`onServiceDied()` 只在通知携带的服务实例与当前绑定实例相同时清除发布通道，旧服务的延迟死亡通知
+不会清除后来绑定的新服务。`saveAndPublishConfig()` 先通过
+`CredentialStore.save()` 持久化完整配置，再把同一配置快照交给私有 `publishRemoteConfig()`；
+服务绑定时也只允许在同步入口内部调用该私有发布方法。`RemoteConfigStore.save()` 使用 `commit()`
+同步提交完整配置；提交返回 `false` 时直接抛出发布失败，只有提交成功后才记录配置已发布。
+
 RemotePreferences 配置必须同时包含服务地址、用户名、密码、OTP、图片根目录、设备型号、
 备份开关和备份文件夹；任一字段缺失都明确返回配置格式错误，不迁移或补默认字段。
+其中 7 个文本字段必须是 JSON 原生 `String`，`backup_enabled` 必须是原生 `Boolean`；解析器拒绝 Android `JSONObject.getString()` 对数字或布尔值的隐式字符串转换。
 
 ### 3.3 备份上传链路
 
@@ -153,6 +163,7 @@ ColorOS NasBackupUploadRequest (seq)
 已实现：
 
 - 通过模块配置页开启/关闭备份；
+- 动态发现 `SYNO.FileStation.Upload` 与 `SYNO.FileStation.MD5`，并要求两者支持 v2；
 - 将所有照片写入 `remoteRoot/backupFolder` 这个固定目录；
 - 不再根据每次请求的手机型号或本地相册名创建子目录；
 - 查询本地已上传 hash 索引；
@@ -163,6 +174,12 @@ ColorOS NasBackupUploadRequest (seq)
 - 只有 DSM 上传响应明确返回 `success: true` 后才写入本地 hash 索引，HTTP 2xx 本身不算成功；
 - 将结果映射为 ColorOS 的 `yjq`、`teq` 和 `ycq`；
 - 错误返回失败结果，不伪造成功。
+
+上传结果使用 ColorOS 现有错误语义：配置缺失、关闭、损坏或凭据读取失败，本地 hash 索引查询
+失败，以及 DSM API 发现、认证、旧 SID 注销、MD5 校验或上传失败都映射为 `UPLOAD_FAILED`；
+ColorOS hash、文件名、路径或照片输入流无效映射为 `READ_DATA_FAILED`；本地索引或 DSM 确认内容
+已存在，以及上传时的远端同名冲突映射为 `FILE_ALREADY_EXISTS`；DSM 已确认成功但本地 hash
+索引提交失败映射为 `UPLOAD_NOTICE_FAILED`。
 
 备份关闭时，`dpk.d(...)` 和 `dpk.m(...)` 返回 `0`，ColorOS 不启动群晖备份任务；相册浏览、
 预览和下载仍保持可用。备份文件夹参与本地 hash 索引作用域，用户切换目标文件夹后不会错误
@@ -209,7 +226,6 @@ Application.attach() interceptor
        ├─ installGalleryHomeHook()
        ├─ installEntryHook()
        ├─ installSyntheticDevicePresenceHook()
-       ├─ installLabelHook()
        └─ installGalleryCardHooks()
 ```
 
@@ -217,11 +233,9 @@ Application.attach() interceptor
 Hook 安装失败并记录 `hook target resolution failed`。因此相册升级时必须完整核对全部反射
 合约，不能看到第一个崩溃点后只修一个方法名。
 
-当前共涉及：
-
-- 1 个启动 Hook：`Application.attach(Context)`；
-- 18 个相册私有成员 Hook，其中包括 1 个构造器；
-- 4 个只用于读取单图设备身份或调用回调、并未被 Hook 的反射方法。
+`HookTargets` 当前共保存 25 个反射目标：16 个安装 Hook 的相册私有成员（其中包括 1 个构造器）、
+4 个只用于读取单图设备身份或调用回调的辅助方法，以及 5 个辅助字段。记录之外另有 1 个启动
+Hook：`Application.attach(Context)`，因此运行时合计安装 17 个 Hook。
 
 `HookTargets` 字段与实际反射目标的完整对应关系：
 
@@ -230,8 +244,6 @@ Hook 安装失败并记录 `hook target resolution failed`。因此相册升级�
 | `readBoolean` | `hda.c(String, boolean, boolean)` |
 | `readBooleanDefault` | `hda.d(int, String, boolean)` |
 | `openNasDeviceSpace` | `goq.a(Context, String, DiagnosePage, int)` |
-| `resolveFolderNote` | `bug.w(long)` |
-| `resolveNasStateMessage` | `zcq.m(Context)` |
 | `cloudSyncProxyConstructor` | `CloudSyncProxyDM.<init>()` |
 | `listNasDevices` | `ahq.b()` |
 | `readGalleryStats` | `mgq.f(String)` |
@@ -375,8 +387,10 @@ CloudSyncProxyDM
                       └─ 替换为 ColorOsNasProviderProxy
 ```
 
-原飞牛 Provider 被保存在动态代理中。只有目标设备为 `synology-dsm7` 的调用才走 DSM；其余
-设备、Java Object 方法以及非群晖路径继续转发原 Provider。
+原飞牛 Provider 被保存在动态代理中。具有设备参数的调用只有目标设备为 `synology-dsm7` 时才走
+DSM，其他设备请求原样转发原 Provider。`b()` 和 `c()` 是代理级 Provider 合约，分别固定返回
+`NasProvider.FEINIU` 和 `true`；`f()` 没有群晖分支，直接转发原 Provider。Java `Object` 方法不
+进入业务 Provider 分流，代理自身提供 `toString()`、identity `hashCode()` 和 identity `equals()`。
 
 ### 5.5 设备列表注入
 
@@ -463,7 +477,7 @@ ColorOSSynologyNAS-status
 ```
 
 `AtomicBoolean nasStatusRefreshInFlight` 防止重复探测；Hook 本身先返回现有 Flow，后台结果再
-更新 Flow、型号、状态和统计数据。冷启动时“已有配置”只恢复缓存型号，不等同于“已连接”；
+更新 Flow、型号和连接状态，不改写相册 DAO 统计数据。冷启动时“已有配置”只恢复缓存型号，不等同于“已连接”；
 连接状态保持 `false`，直到本次 DSM 探测明确成功。
 
 **升级验收不变量：进入相册后必须能够立即点击“图集”，相册主线程不能等待 DSM 网络请求。**
@@ -610,30 +624,20 @@ com.oplus.aiunit.vision.z8g.cancel()
 这些句柄保存在弱引用集合中；相册之后对合成句柄调用 `cancel()` 时直接返回，避免合成句柄内部
 空 `CoroutineScope` 导致崩溃。
 
+合成句柄的完成进度先写入无界 Channel，再正常关闭 Channel。当前 Kotlin 运行时的非阻塞写入
+必须按精确 JVM ABI 调用 `SendChannel.trySend-JP2dKIU(Object): Object`；不能按方法名前缀搜索，
+也不能回退到 `send`、`offer` 或其他版本的混淆名称。
+
 其他真实下载句柄必须继续 `chain.proceed()`。
 
-### 5.13 飞牛文案替换
+### 5.13 飞牛文案隔离边界
 
-Hook：
+`bug.w(long)` 与 `zcq.m(Context)` 都不携带 NAS 设备标识，无法证明当前调用属于群晖合成设备。
+对它们安装全局 Hook 会同时改写真实飞牛或其他 NAS 页面，因此当前版本不 Hook 这两个方法。
 
-```text
-com.oplus.aiunit.vision.bug.w(long)
-com.oplus.aiunit.vision.zcq.m(Context)
-```
-
-替换规则集中在 `HookPolicy`：
-
-```text
-飞牛 NAS / FeiNiu NAS → 群晖 NAS
-```
-
-包含飞牛文案的 NAS 状态说明替换为：
-
-```text
-群晖 NAS 图片已接入私有云图集，可直接浏览和下载
-```
-
-不包含飞牛字样的其他文案保持相册原值。
+群晖品牌、型号和连接状态只在能够读取 `GalleryContract.DEVICE_ID` 的设备列表、首页分组、卡片绑定
+和 availability 回调边界更新。没有设备身份的通用页面保持 ColorOS 原文案，不使用 ThreadLocal、
+调用时序推断或兼容分支猜测身份。
 
 ### 5.14 群晖删除确认框去除飞牛回收站说明
 
@@ -715,27 +719,27 @@ byte[] x(String, String, ThumbnailSize);
 | `d` | 协程查询备份可用性 | 备份开启返回 `1`，关闭返回 `0` |
 | `e` | Photos availability | 已配置为 `AVAILABLE`，否则为 `UNKNOWN` |
 | `f` | 无群晖特殊分支 | 转发原飞牛 Provider |
-| `g` | 当前群晖分支 | 返回 `0L` |
-| `h` | 当前未使用 | 返回 `null` |
+| `g` | 视频大小查询 | 群晖图片 Provider 不提供视频大小，抛出 `UnsupportedOperationException` |
+| `h` | 飞牛 App 安装地址查询 | 群晖 Provider 不提供飞牛安装地址，抛出 `UnsupportedOperationException` |
 | `i` | 同步查询备份 hash | `GalleryBackupClient.findExistingHashes()` |
-| `j` | 当前未使用 | 返回 `null` |
+| `j` | 飞牛设备连接状态操作 | 有意执行 void no-op；群晖 HTTP 会话按请求延迟创建 |
 | `k` | 协程上传备份 | `GalleryBackupClient.upload()` |
 | `l` | 分页列出远端相册 | `GalleryRemoteClient.listAlbums()` |
 | `m` | 阻塞查询备份可用性 | 备份开启返回 `1`，关闭返回 `0` |
 | `n` | Photos App 状态 | 已配置为 `RUNNING`，否则为 `STOPPED` |
 | `o` | 图库统计 | 返回内存缓存照片数，不触发 DSM 清单扫描 |
 | `p` | 删除远端照片 | `GalleryRemoteClient.deletePhotos()` |
-| `q` | 当前未使用 | 返回 `null` |
+| `q` | 飞牛设备连接状态操作 | 有意执行 void no-op；群晖 HTTP 会话按请求延迟创建 |
 | `r` | 同步上传备份 | `GalleryBackupClient.upload()` |
 | `s` | 协程查询备份 hash | `GalleryBackupClient.findExistingHashes()` |
 | `t` | 分页列出相册照片 | `GalleryRemoteClient.listPhotos()` |
-| `u` | 当前未使用 | 返回 `null` |
-| `v` | 当前未实现的字节区间请求 | 返回空字节数组 |
-| `w` | 原图流式读取 | `GalleryRemoteClient.downloadOriginal()` + callback |
+| `u` | 飞牛设备连接状态操作 | 有意执行 void no-op；群晖 HTTP 会话按请求延迟创建 |
+| `v` | 视频字节区间请求 | 群晖图片 Provider 不提供视频字节区间，抛出 `UnsupportedOperationException` |
+| `w` | 原图流式读取 | `GalleryRemoteClient.streamOriginal()` + callback |
 | `x` | 缩略图读取 | `GalleryRemoteClient.downloadThumbnail()` |
 
-表中的固定值或空返回只描述当前 `16.50.8` 调用合约。新版如果开始实际使用这些方法，必须先从
-调用点恢复语义，再决定实现，不要沿用旧返回值掩盖新行为。
+表中的固定值、void no-op 和明确拒绝只描述当前 `16.50.8` 调用合约。新版如果改变这些方法的
+调用语义，必须先从调用点恢复合同，再决定实现，不能用空值、零值或空字节伪装成功。
 
 ### 6.2 群晖目标设备参数位置
 
@@ -744,10 +748,13 @@ byte[] x(String, String, ThumbnailSize);
 ```text
 l / t   → args[2]
 k / r   → 从 DEX 原始字段 seq.a 解析 targetDeviceUserId
-其他方法 → 默认 args[0]
+a / d / e / g / h / i / j / m / n / o / p / q / s / u / v / w / x → args[0]
+b / c   → 无设备参数，使用代理级固定语义
+f       → 无设备参数，直接转发原 Provider
 ```
 
-如果当前调用不是群晖目标，动态代理转发原飞牛 Provider。新版修改接口签名后，必须同时更新：
+对于上述具有设备身份的调用，如果目标不是群晖，动态代理会原样转发原飞牛 Provider。新版修改
+接口签名后，必须同时更新：
 
 - `targetsSynology()` 的参数定位；
 - 每个 `case` 的参数索引；
@@ -816,7 +823,9 @@ k / r   → 从 DEX 原始字段 seq.a 解析 targetDeviceUserId
 - `srb(String, NasDeviceAvailability)`；
 - `b3q` 和 `NasPhotoInfo` 构造器；
 - `z8g` 构造器、完成状态和 `cancel()` 依赖；
-- 原图 callback 是否仍为 `invoke(byte[], boolean)`；
+- `SendChannel.trySend-JP2dKIU(Object): Object` 的精确 JVM 名称、参数和返回类型；
+- 原图 callback 源语义是否仍为 `Function2<byte[], Boolean, Unit>`，JVM 方法是否仍为
+  `invoke(Object, Object): Object`；
 - 备份输入流 provider 是否仍为 `invoke(): InputStream`；
 - `MutableStateFlow` 创建和 `setValue()` 调用方式。
 
@@ -849,14 +858,24 @@ NasAlbumsViewDataBinding 对应的私有云图集卡片布局
 SYNO.API.Info
 SYNO.API.Auth
 SYNO.Core.System
-SYNO.FileStation.List
+SYNO.FileStation.List v2
 SYNO.FileStation.Thumb
 SYNO.FileStation.Download
 SYNO.FileStation.Delete v2
+SYNO.FileStation.Upload v2
+SYNO.FileStation.MD5 v2
 ```
+
+DSM 响应中的 SID、Delete `taskid`、System `model`、API `path` 以及 List `path`/`name` 必须是 JSON 原生 `String`；解析器拒绝 Android `JSONObject.getString()` 对数字、布尔等标量值的隐式字符串转换。
 
 配置只接受 HTTPS，并使用 Android 默认 TLS 严格证书校验。SID 只保留在进程内存中；模块 App
 内保存的密码和 OTP 由 Android Keystore AES-256-GCM 加密。
+
+“保存并连接”的测试 SID 无论型号或目录验证成功、失败都会进入注销；主体操作与注销同时失败时，
+主体异常保持为主异常，注销异常作为 suppressed exception 保留，主体成功但注销失败时则直接暴露
+注销异常。浏览和备份只复用与完整认证配置指纹（服务地址、用户名、密码、OTP 和远端根目录）
+一致的内存会话；这些字段变化时先清空旧会话引用，浏览链路同时清空清单快照，再注销旧 SID。
+注销失败会明确中止新会话创建，后续调用也不会复用该旧 SID。
 
 ### 8.2 相册和照片模型
 
@@ -869,6 +888,13 @@ SYNO.FileStation.Delete v2
 - 照片按修改时间倒序；
 - DSM 路径经 SHA-256 生成稳定正数 ID；
 - 远端清单 snapshot TTL 为 60 秒。
+
+`SYNO.FileStation.List` 的动态发现结果必须覆盖 v2，目录分页请求固定使用 `version=2`。分页响应
+严格要求 `files`、`offset` 和 `total`，响应 `offset` 必须与本次请求完全一致。每个目录项严格要求
+`name`、`path`、`isdir`、`additional.size` 和
+`additional.time.mtime`；文件扩展名和 MIME 必须从 `name` 解析，`path` 只表达远端身份。字段
+缺失、类型错误、分页 offset 不一致，或空分页与尚未到达的 `total` 矛盾时都明确返回响应格式错误，
+不补默认值也不静默截断。
 
 ### 8.3 缩略图和原图
 
@@ -1031,8 +1057,6 @@ rg -n \
 | 卡片绑定 | `h9q.e` |  | NAS ViewBinding |
 | 卡片状态刷新 | `h9q.l` |  | availability 消费点 |
 | 设备移除判定 | `ehq.b` |  | 回调 Boolean |
-| 标题文案 | `bug.w` |  | NAS 标题字符串 |
-| 状态文案 | `zcq.m` |  | NAS 状态说明 |
 
 “证据”列应写调用点、构造器、字段写入/读取或资源引用，避免只记录猜测出的新混淆名。
 
@@ -1041,7 +1065,8 @@ rg -n \
 必须逐项确认：
 
 1. `Application.attach(Context)` 后相册真实 ClassLoader 的获取仍成立；
-2. 上表 18 个相册 Hook 目标的类、方法名、修饰符、参数顺序和返回值；
+2. `HookTargets` 的 25 个反射目标，以及其中 16 个相册 Hook 目标的类、方法名、修饰符、参数顺序
+   和返回值；
 3. `Function1.invoke(Object)`、`dst.b(String)`、`q7b.f(dst)` 和 `jlq.i0()` 的调用仍成立；
 4. `dpk` 全部方法签名、同步/协程形态和参数顺序；
 5. `l/t` 的 device ID 参数位置；
@@ -1051,9 +1076,11 @@ rg -n \
 9. `actionFlags == 20` 是否仍是“设备管理”；
 10. `NasDeviceAvailability.CONNECTED/OFFLINE` 是否仍存在且语义不变；
 11. `iv_nas_title_icon`、私有云图集 layout 和 ViewBinding 字段；
-12. 原图 callback 是否仍为 `invoke(byte[], boolean)`；
+12. 原图 callback 源语义是否仍为 `Function2<byte[], Boolean, Unit>`，JVM 方法是否仍为
+    `invoke(Object, Object): Object`；
 13. 备份输入流 provider 是否仍为 `invoke(): InputStream`；
-14. `z8g` 构造器、完成状态、`cancel()` 和内部 scope 行为；
+14. `z8g` 构造器、完成状态、`cancel()`、内部 scope 行为，以及
+    `SendChannel.trySend-JP2dKIU(Object): Object` 的精确 ABI；
 15. Provider 注册表是否仍由 `NasProvider.FEINIU` 键映射到接口实例；
 16. 首页插入位置的分组类型 `a == 4` 是否仍代表“更多图集”；
 17. 多选删除仍由 `hfq$b` 持有 `$params.a`（JADX 别名 `f9751a`），单图删除仍可由 `$itemPath` 恢复
@@ -1101,7 +1128,7 @@ export ANDROID_HOME=/Volumes/MacHD/Library/Android/sdk
 当前已知基线：
 
 ```text
-Unit tests: 86
+Unit tests: 167
 Failures: 0
 Errors: 0
 Lint errors: 0
@@ -1124,7 +1151,7 @@ app/build/outputs/apk/debug/app-debug.apk
 ```bash
 # Hook 安装和反射目标
 rg -n \
-  'static HookTargets resolve|installFeatureHooks|installProviderHooks|installNasPreloadHook|installGalleryHomeHook|installEntryHook|installSyntheticDevicePresenceHook|installLabelHook|installGalleryCardHooks' \
+  'static HookTargets resolve|installFeatureHooks|installProviderHooks|installNasPreloadHook|installGalleryHomeHook|installEntryHook|installSyntheticDevicePresenceHook|installGalleryCardHooks' \
   app/src/main/java/com/jaxson/coloros/synologynas/{HookTargetResolver,GalleryHookInstaller}.java
 
 # Provider 特殊方法分支
@@ -1269,10 +1296,10 @@ hook installation failed
 |---|---|
 | `ColorOsSynologyNasModule.java` | libxposed 生命周期、版本门和 Hook 依赖装配 |
 | `HookTargetResolver.java` / `HookTargets.java` | 当前相册版本的完整私有反射目标解析与结果集合 |
-| `GalleryHookInstaller.java` | Provider、页面入口、状态、预加载、文案和卡片 Hook 安装 |
+| `GalleryHookInstaller.java` | Provider、页面入口、状态、预加载和卡片 Hook 安装 |
 | `DeleteDialogHookInstaller.java` | 群晖删除弹窗作用域和飞牛回收站正文抑制 |
 | `SynologyNasHookState.java` | Hook 间共享的型号、连接状态和照片统计 |
-| `HookPolicy.java` | 目标版本、能力开关、设备管理动作、删除弹窗和文案策略 |
+| `HookPolicy.java` | 目标版本、能力开关、设备管理动作和删除弹窗策略 |
 | `gallery/GalleryContract.java` | 群晖合成设备公共常量 |
 | `gallery/ColorOsGalleryBridge.java` | Provider 注册、设备、首页、统计和 StateFlow 反射门面 |
 | `gallery/ColorOsGalleryCardBridge.java` | 群晖卡片资源、型号和连接状态绑定 |
@@ -1329,7 +1356,8 @@ app/src/test/java/com/jaxson/coloros/synologynas/
 - 没有把浏览改成下载到本机；
 - 没有改动已锁定缩略图链路，除非任务明确要求；
 - 没有用异常吞噬、假成功、空列表或第二份状态源掩盖真实问题；
-- clean 测试、Lint、构建和完整真机清单均已通过。
+- 本地 clean 测试、Lint 和构建均已通过；
+- 完整真机清单仍须在提交前逐项完成。
 
 只要这些边界和语义锚点保持清晰，即使下一版混淆类名全部变化，也可以沿现有飞牛 NAS 真实
 调用链完成局部重新映射，而不需要重头设计群晖接入。

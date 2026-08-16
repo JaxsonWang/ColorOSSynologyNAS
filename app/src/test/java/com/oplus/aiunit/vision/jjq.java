@@ -1,5 +1,6 @@
 package com.oplus.aiunit.vision;
 
+// 模拟 ColorOS NAS 图库统计的数据合同
 public final class jjq {
     // 模拟 jjq.a 图库统计中的远端照片数量
     public final int a;

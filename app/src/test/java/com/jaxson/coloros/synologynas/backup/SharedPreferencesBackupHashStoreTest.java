@@ -6,6 +6,7 @@ import org.junit.Test;
 
 import static org.junit.Assert.assertNotEquals;
 
+/** 验证本地照片备份哈希索引的配置作用域隔离规则 */
 public final class SharedPreferencesBackupHashStoreTest {
     /** 验证不同备份目录使用彼此隔离的本地哈希索引作用域 */
     @Test

@@ -12,6 +12,7 @@ import android.widget.TextView;
 
 import com.jaxson.coloros.synologynas.R;
 
+// 将群晖品牌、型号和连接状态写入 ColorOS NAS 卡片
 final class ColorOsGalleryCardBridge {
     // 定位 ColorOS NAS 相册卡片当前使用的 ViewData 类型
     private static final String NAS_VIEW_DATA = "com.oplus.aiunit.vision.mjq";
@@ -105,8 +106,9 @@ final class ColorOsGalleryCardBridge {
         TextView status = (TextView) ColorOsGalleryReflection.readField(binding, "l");
         // 型号控件当前布局参数，用于调整与 Logo 的固定间距
         ViewGroup.LayoutParams layoutParams = model.getLayoutParams();
-        if (layoutParams instanceof ViewGroup.MarginLayoutParams
-                marginLayoutParams /* 已确认支持起始边距的布局参数 */) {
+        if (layoutParams instanceof
+                // 已确认支持起始边距的布局参数
+                ViewGroup.MarginLayoutParams marginLayoutParams) {
             marginLayoutParams.setMarginStart(dp(model.getContext(), 3));
             model.setLayoutParams(marginLayoutParams);
         }

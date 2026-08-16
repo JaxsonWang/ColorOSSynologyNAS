@@ -1,5 +1,6 @@
 package com.jaxson.coloros.synologynas.gallery;
 
+// 集中保存群晖合成设备和相册下载尺寸合同
 public final class GalleryContract {
     // ColorOS 相册资源查找和 Hook 版本门使用的目标包名
     public static final String GALLERY_PACKAGE = "com.coloros.gallery3d";

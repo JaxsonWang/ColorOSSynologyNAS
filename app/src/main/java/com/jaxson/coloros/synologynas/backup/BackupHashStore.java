@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.Set;
 
+/** 隔离照片备份事务与本地 ColorOS 原生哈希索引存储 */
 public interface BackupHashStore {
     /**
      * 查询当前配置作用域内已完成备份的 ColorOS 原生哈希

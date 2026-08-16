@@ -1,12 +1,16 @@
 package com.jaxson.coloros.synologynas.gallery;
 
 import com.oplus.aiunit.vision.jjq;
+import com.oplus.aiunit.vision.alq;
+import com.oplus.aiunit.vision.dpk;
 import com.oplus.aiunit.vision.e5q;
 import com.oplus.aiunit.vision.ngq;
 import com.oplus.aiunit.vision.oe2;
 import com.oplus.aiunit.vision.ogq;
 import com.oplus.aiunit.vision.srb;
+import com.oplus.aiunit.vision.xhb;
 import com.oplus.gallery.business_lib.nas.NasDeviceAvailability;
+import com.oplus.gallery.business_lib.nas.NasProvider;
 
 import org.junit.Test;
 
@@ -18,7 +22,44 @@ import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
+// 验证 ColorOS 设备、状态、首页入口和 Provider 注册桥接
 public final class ColorOsGalleryBridgeTest {
+    @Test
+    // 验证 FEINIU 槽位正常替换且重复安装保持同一群晖代理
+    public void replacesFeiniuProviderOnceAndKeepsRepeatedInstallIdempotent() throws Exception {
+        // 保存原飞牛 Provider 的注册表夹具
+        xhb registry = new xhb();
+        // 用于确认首次替换前槽位内容的原飞牛 Provider
+        dpk original = deviceUserId /* 原 Provider 收到的设备标识 */ -> null;
+        registry.a.put(NasProvider.FEINIU, original);
+        // 持有当前 NAS 管理对象的 CloudSyncProxyDM 夹具
+        CloudSyncProxyFixture cloudSyncProxy = new CloudSyncProxyFixture(new alq(registry));
+
+        assertTrue(replaceProvider(cloudSyncProxy));
+
+        // 首次替换后保存的群晖 Provider 代理
+        dpk proxy = registry.a.get(NasProvider.FEINIU);
+        assertTrue(ColorOsNasProviderProxy.isSynologyProvider(proxy));
+
+        assertFalse(replaceProvider(cloudSyncProxy));
+
+        assertSame(proxy, registry.a.get(NasProvider.FEINIU));
+    }
+
+    @Test
+    // 验证 FEINIU 槽位缺失时立即暴露私有注册表合同漂移
+    public void rejectsMissingFeiniuProviderSlot() {
+        // 不包含 FEINIU 映射的空注册表夹具
+        xhb registry = new xhb();
+        // 持有空注册表的 CloudSyncProxyDM 夹具
+        CloudSyncProxyFixture cloudSyncProxy = new CloudSyncProxyFixture(new alq(registry));
+
+        assertThrows(
+                IllegalStateException.class,
+                () /* 触发缺失 FEINIU 槽位的替换 */ -> replaceProvider(cloudSyncProxy)
+        );
+    }
+
     @Test
     // 验证 Hook 缓存照片数按 jjq 构造合同映射且视频数固定为零
     public void createsGalleryStatsForRemotePhotoCount() throws Exception {
@@ -294,11 +335,36 @@ public final class ColorOsGalleryBridgeTest {
         );
     }
 
+    // 使用不触发远端调用的依赖执行 Provider 注册表替换
+    private static boolean replaceProvider(CloudSyncProxyFixture cloudSyncProxy /* 待替换夹具 */)
+            throws ReflectiveOperationException {
+        return ColorOsGalleryBridge.replaceProvider(
+                cloudSyncProxy,
+                ColorOsGalleryBridgeTest.class.getClassLoader(),
+                new GalleryRemoteClient(null),
+                null,
+                () /* 返回固定缓存照片数量 */ -> 0
+        );
+    }
+
+    // 模拟 CloudSyncProxyDM.d 固定持有 alq 管理对象
+    private static final class CloudSyncProxyFixture {
+        // 模拟 CloudSyncProxyDM 中唯一声明为 alq 的字段
+        private final alq d;
+
+        // 创建绑定 NAS 管理对象的 CloudSyncProxyDM 夹具
+        private CloudSyncProxyFixture(alq nasManager /* NAS 管理对象 */) {
+            this.d = nasManager;
+        }
+    }
+
+    // 模拟不符合 jjq.a 固定字段布局的统计对象
     private static final class UnknownGalleryStats {
         // 模拟不得被当作照片数量读取的无关 int 字段
         private final int unrelated = 37;
     }
 
+    // 模拟通过 Lazy 持有首页分组列表的模型
     private static final class MainTabModelFixture {
         // 保存首页 Lazy 实际返回的可变分组列表
         private final ArrayList<Object> items = new ArrayList<>();
@@ -313,6 +379,7 @@ public final class ColorOsGalleryBridgeTest {
         }
     }
 
+    // 模拟返回固定首页分组列表的 Lazy 值容器
     private static final class ValueHolder {
         // 保存模拟 Kotlin Lazy 返回的实际首页分组列表
         private final Object value;

@@ -2,6 +2,7 @@ package com.jaxson.coloros.synologynas.gallery;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
@@ -12,6 +13,7 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.List;
 
+// 验证群晖缩略图、原图回调、删除和型号读取客户端边界
 public final class GalleryRemoteClientTest {
     @Test
     // 验证原图分块和唯一完成标记按顺序写入 ColorOS 回调
@@ -28,6 +30,34 @@ public final class GalleryRemoteClientTest {
         assertArrayEquals(new byte[]{1, 2, 3}, callback.bytes());
         assertTrue(callback.completed);
         assertEquals(3, callback.invocations);
+    }
+
+    @Test
+    // 验证缺少当前 Kotlin Function2 双 Object 桥接方法时明确拒绝回调
+    public void rejectsCallbackWithoutCurrentKotlinJvmBridge() {
+        // 使用固定原图数据源创建待测客户端
+        GalleryRemoteClient client = new GalleryRemoteClient(new FakeDataSource());
+        // 只提供语义参数但不符合实际 JVM 桥接签名的回调
+        TypedCallback callback = new TypedCallback();
+
+        assertThrows(
+                IOException.class,
+                () /* 触发回调 JVM 合同解析 */ -> client.streamOriginal("photo", callback)
+        );
+    }
+
+    @Test
+    // 验证双 Object invoke 返回类型错误时明确拒绝回调
+    public void rejectsCallbackBridgeWithWrongReturnType() {
+        // 使用固定原图数据源创建待测客户端
+        GalleryRemoteClient client = new GalleryRemoteClient(new FakeDataSource());
+        // 提供错误 void 返回类型的回调桥接方法
+        VoidBridgeCallback callback = new VoidBridgeCallback();
+
+        assertThrows(
+                IOException.class,
+                () /* 触发回调返回类型合同解析 */ -> client.streamOriginal("photo", callback)
+        );
     }
 
     @Test
@@ -64,6 +94,7 @@ public final class GalleryRemoteClientTest {
         assertEquals("DS220+", client.probeDeviceModel());
     }
 
+    // 记录双 Object JVM 桥接收到的原图分块和完成标记
     public static final class RecordingCallback {
         // 按回调顺序汇集收到的原图字节
         private final ByteArrayOutputStream output = new ByteArrayOutputStream();
@@ -74,13 +105,18 @@ public final class GalleryRemoteClientTest {
         private int invocations;
 
         // 模拟 ColorOS 双参数原图回调并记录每次调用
-        public void invoke(
-                byte[] bytes, // 本次收到的原图字节分块
-                boolean completed // 本次是否为完成通知
+        public Object invoke(
+                Object bytesValue, // Kotlin Function2 传入的原图字节对象
+                Object completedValue // Kotlin Function2 传入的完成标记对象
         ) throws IOException {
+            // 已按当前回调合同确认的原图字节分块
+            byte[] bytes = (byte[]) bytesValue;
+            // 已按当前回调合同确认的完成标记
+            boolean completed = (Boolean) completedValue;
             invocations++;
             output.write(bytes);
             this.completed = completed;
+            return kotlin.Unit.INSTANCE;
         }
 
         // 返回按回调顺序汇集的全部原图字节
@@ -89,6 +125,28 @@ public final class GalleryRemoteClientTest {
         }
     }
 
+    // 模拟缺少双 Object JVM 桥接方法的类型化回调
+    public static final class TypedCallback {
+        // 模拟不存在双 Object JVM 桥接方法的错误回调
+        public Object invoke(
+                byte[] bytes, // 原图字节分块
+                boolean completed // 完成标记
+        ) {
+            return kotlin.Unit.INSTANCE;
+        }
+    }
+
+    // 模拟双 Object 桥接返回类型错误的回调
+    public static final class VoidBridgeCallback {
+        // 模拟返回类型不符合 Function2 合同的错误桥接方法
+        public void invoke(
+                Object bytes, // 原图字节对象
+                Object completed // 完成标记对象
+        ) {
+        }
+    }
+
+    // 提供固定远端媒体结果并记录删除参数的数据源夹具
     private static final class FakeDataSource implements RemoteGalleryDataSource {
         // 记录最近一次远端删除请求的照片标识
         private List<String> deletedPhotoIds = List.of();

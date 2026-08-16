@@ -2,16 +2,20 @@ package com.jaxson.coloros.synologynas.gallery;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Collections;
 import java.util.Set;
 import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicReference;
 
+// 适配 ColorOS 缩略图枚举、完成进度 Channel 和下载句柄
 final class ColorOsNasDownloadAdapter {
     // 定位 ColorOS 原图下载进度 DTO
     private static final String DOWNLOAD_PROGRESS = "com.oplus.aiunit.vision.wac";
     // 定位 ColorOS 原图下载句柄 DTO
     private static final String DOWNLOAD_HANDLE = "com.oplus.aiunit.vision.z8g";
+    // 当前 Kotlin SendChannel 非阻塞写入方法的精确 JVM 名称
+    private static final String TRY_SEND_METHOD = "trySend-JP2dKIU";
     // 以弱引用记录已同步完成的合成句柄，避免 ColorOS 后续 cancel 崩溃
     private static final Set<Object> SYNTHETIC_DOWNLOADS = Collections.synchronizedSet(
             Collections.newSetFromMap(new WeakHashMap<>())
@@ -32,9 +36,16 @@ final class ColorOsNasDownloadAdapter {
 
     // 将 ColorOS 缩略图枚举映射为群晖客户端当前支持的尺寸标识
     static String thumbnailSize(Object colorOsSize /* ColorOS 私有尺寸枚举 */) {
-        return "THUMBNAIL_SIZE_L".equals(String.valueOf(colorOsSize))
-                ? GalleryContract.THUMBNAIL_LARGE
-                : GalleryContract.THUMBNAIL_SMALL;
+        if (!(colorOsSize instanceof Enum<?> size /* 已确认的缩略图枚举 */)) {
+            throw new IllegalArgumentException("ColorOS thumbnail size is not an enum");
+        }
+        return switch (size.name()) {
+            case "THUMBNAIL_SIZE_L" -> GalleryContract.THUMBNAIL_LARGE;
+            case "THUMBNAIL_SIZE_S" -> GalleryContract.THUMBNAIL_SMALL;
+            default -> throw new IllegalArgumentException(
+                    "Unknown ColorOS thumbnail size: " + size.name()
+            );
+        };
     }
 
     // 为已同步写完的原图构造 ColorOS 完成状态下载句柄
@@ -48,8 +59,33 @@ final class ColorOsNasDownloadAdapter {
         Object channel = newCompletedChannel(progress);
         // ColorOS 原图下载句柄的运行时类型
         Class<?> type = Class.forName(DOWNLOAD_HANDLE, false, galleryClassLoader);
-        // 当前版本用于承载下载 Channel 的混淆构造器
-        Constructor<?> constructor = type.getDeclaredConstructors()[0];
+        // 当前版本下载句柄构造器中的 Kotlin Channel 接口
+        Class<?> channelType = Class.forName(
+                "kotlinx.coroutines.channels.Channel",
+                false,
+                galleryClassLoader
+        );
+        // 当前版本下载句柄构造器中的 Kotlin CoroutineScope 接口
+        Class<?> coroutineScopeType = Class.forName(
+                "kotlinx.coroutines.CoroutineScope",
+                false,
+                galleryClassLoader
+        );
+        // 当前版本下载句柄构造器中的 Kotlin Job 接口
+        Class<?> jobType = Class.forName(
+                "kotlinx.coroutines.Job",
+                false,
+                galleryClassLoader
+        );
+        // 当前版本用于承载下载 Channel 的精确六参数构造器
+        Constructor<?> constructor = type.getDeclaredConstructor(
+                channelType,
+                AtomicReference.class,
+                coroutineScopeType,
+                jobType,
+                String.class,
+                String.class
+        );
         constructor.setAccessible(true);
         // 返回给 ColorOS 并等待后续 cancel 调用的合成句柄
         Object handle = constructor.newInstance(
@@ -105,6 +141,12 @@ final class ColorOsNasDownloadAdapter {
                 false,
                 galleryClassLoader
         );
+        // 当前 Kotlin Channel 接口继承的精确发送合同类型
+        Class<?> sendChannelType = Class.forName(
+                "kotlinx.coroutines.channels.SendChannel",
+                false,
+                galleryClassLoader
+        );
         // 保持当前句柄使用的 SUSPEND 溢出策略
         Object suspend = Enum.valueOf((Class<? extends Enum>) overflowType, "SUSPEND");
         // 当前 Kotlin 运行时暴露的 Channel 工厂方法
@@ -117,19 +159,14 @@ final class ColorOsNasDownloadAdapter {
         // 承载唯一完成进度的无界 Channel 实例
         Object channel = channelFactory.invoke(null, Integer.MAX_VALUE, suspend, null);
 
-        // 当前 Kotlin 版本经名称混淆后实际可调用的 trySend 方法
-        Method trySend = null;
-        for (Method candidate : channel.getClass().getMethods()) { // Channel 候选方法
-            if (candidate.getName().startsWith("trySend")
-                    && candidate.getParameterCount() == 1) {
-                trySend = candidate;
-                break;
-            }
+        // 当前 SendChannel 接口用于非阻塞写入完成进度的精确方法
+        Method trySend = sendChannelType.getMethod(TRY_SEND_METHOD, Object.class);
+        if (trySend.getReturnType() != Object.class
+                || Modifier.isStatic(trySend.getModifiers())) {
+            throw new NoSuchMethodException(
+                    "SendChannel.trySend-JP2dKIU(Object): Object instance method not found"
+            );
         }
-        if (trySend == null) {
-            throw new NoSuchMethodException("Channel.trySend");
-        }
-        trySend.setAccessible(true);
         trySend.invoke(channel, progress);
         // 当前 Channel 接口用于正常关闭且不携带异常的方法
         Method close = channel.getClass().getMethod("close", Throwable.class);

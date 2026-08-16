@@ -1,5 +1,6 @@
 package com.jaxson.coloros.synologynas.backup;
 
+/** 严格封装 ColorOS 当前 64 位小写 SHA-256 原生照片哈希 */
 public final class ColorOsFileHash {
     // 固定 ColorOS 当前原生照片哈希为 64 位小写十六进制 SHA-256
     private static final String NATIVE_HASH_PATTERN = "[0-9a-f]{64}";

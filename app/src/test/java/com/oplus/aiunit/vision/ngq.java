@@ -2,6 +2,7 @@ package com.oplus.aiunit.vision;
 
 import com.oplus.gallery.business_lib.nas.NasProvider;
 
+// 模拟 ColorOS NAS 设备详情的数据合同
 public final class ngq {
     // 模拟 ColorOS NAS 设备归属的 Provider 枚举
     public final NasProvider provider;

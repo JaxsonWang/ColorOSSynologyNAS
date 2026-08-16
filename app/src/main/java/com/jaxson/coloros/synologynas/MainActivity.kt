@@ -61,7 +61,10 @@ class MainActivity : ComponentActivity() {
      *
      * @param savedInstanceState Android 保存的 Activity 状态；当前页面状态由持久配置恢复
      */
-    override fun onCreate(savedInstanceState: Bundle?) {
+    override fun onCreate(
+        // Android 保存的 Activity 状态，当前页面业务值仍由持久配置恢复
+        savedInstanceState: Bundle?,
+    ) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         window.isNavigationBarContrastEnforced = false
@@ -170,8 +173,7 @@ class MainActivity : ComponentActivity() {
             try {
                 // 表示完成 DSM 登录、目录访问和型号读取后的可发布配置
                 val connectedConfig = config.withDeviceModel(DsmClient(config).testConnection())
-                credentialStore.save(connectedConfig)
-                (application as SynologyApplication).publishConfig(connectedConfig)
+                (application as SynologyApplication).saveAndPublishConfig(connectedConfig)
                 runOnUiThread {
                     busy = false
                     statusMessage = getString(R.string.status_connected)
@@ -212,7 +214,10 @@ class MainActivity : ComponentActivity() {
      *
      * @param error 已由连接、凭据或发布边界明确抛出的失败
      */
-    private fun showConnectionError(error: Throwable) {
+    private fun showConnectionError(
+        // 已由连接、凭据或发布边界明确抛出的失败
+        error: Throwable,
+    ) {
         runOnUiThread {
             busy = false
             showError(error)
@@ -224,7 +229,10 @@ class MainActivity : ComponentActivity() {
      *
      * @param error 需要向用户展示的具体失败
      */
-    private fun showError(error: Throwable) {
+    private fun showError(
+        // 需要转换为配置页可见状态的具体失败
+        error: Throwable,
+    ) {
         statusMessage = getString(R.string.status_error, error.message)
         statusTone = StatusTone.ERROR
     }

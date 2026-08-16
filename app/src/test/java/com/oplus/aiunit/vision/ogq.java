@@ -1,5 +1,6 @@
 package com.oplus.aiunit.vision;
 
+// 模拟 ColorOS 首页展示的 NAS 设备信息合同
 public final class ogq {
     // 模拟 ogq 的内部数字标识字段
     public final int f19603a;

@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.util.Collection;
 import java.util.Set;
 
+/** 为 ColorOS 适配层提供备份开关、查重和单张上传业务边界 */
 public interface BackupRepository {
     /** @return 当前配置是否允许照片备份 */
     boolean isEnabled();
